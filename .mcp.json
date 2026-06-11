@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vs-shapes": {
+      "command": "node",
+      "args": ["dist/index.js"]
+    }
+  }
+}

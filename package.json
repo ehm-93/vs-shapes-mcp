@@ -1,0 +1,44 @@
+{
+  "name": "vs-shapes-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for editing, animating, validating, and rendering Vintage Story shape files",
+  "license": "MIT",
+  "author": "Emmett Miller",
+  "type": "module",
+  "bin": {
+    "vs-shapes-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "json5": "^2.2.3",
+    "pngjs": "^7.0.0",
+    "webgpu": "^0.4.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/pngjs": "^6.0.5",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.0": true,
+    "esbuild@0.27.7": true,
+    "webgpu@0.4.0": true
+  }
+}

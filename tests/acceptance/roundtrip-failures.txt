@@ -1,0 +1,55 @@
+round-trip failures: 18/6115 (overall 99.706%, entity 100.000%)
+
+block/metal/furnacesection/lit.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/melted-10.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/melted-12.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/melted-14.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/melted-16.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/melted-2.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/melted-4.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/melted-6.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/melted-8.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/unlit-10.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/unlit-12.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/unlit-14.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/unlit-16.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/unlit-2.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/unlit-4.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/unlit-6.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/unlit-8.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
+
+block/metal/furnacesection/unlit-empty.json
+  parse error: Invalid shape JSON at line 2, column 5: a '//' comment was found — comments are not allowed in shape JSON; delete the comment and re-save the file. Context: "{\r\n    // Model generated using MrCra"
