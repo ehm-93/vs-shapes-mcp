@@ -1246,7 +1246,9 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       description:
         'Kitbash: copy an element subtree from another OPEN document into this one. Names are ' +
         'unique-ified; texture map entries the subtree needs are copied along (keys that collide ' +
-        'with a different path are remapped and reported).',
+        'on path or UV space are remapped and reported). When the source UV space differs, a ' +
+        'textureSizes override is added so the copied face UVs stay valid; stepParentName fields ' +
+        'are stripped when importing under a parent (stale overlay-attachment data).',
       inputSchema: {
         docId: docIdParam,
         fromDocId: z.string().describe('docId of the open source document to copy from.'),

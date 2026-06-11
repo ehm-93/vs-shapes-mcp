@@ -14,7 +14,7 @@
  */
 
 import type { ShapeDocument } from './document.js';
-import { cloneJsonValue, vsnum } from './json.js';
+import { cloneJsonValue, stripLayout, vsnum } from './json.js';
 import { elementMatrices } from './fk.js';
 import { mat4Create, mat4TransformVec3, type Mat4 } from './transform.js';
 import {
@@ -820,6 +820,12 @@ export function reparentElement(
   oldList.splice(oldList.indexOf(entry.el), 1);
   childListOf(doc, newParentEntry?.el ?? null).push(entry.el);
 
+  // Preserved layout embeds the source file's absolute indentation; at a different
+  // nesting depth it would emit the subtree mis-indented. Same depth keeps its bytes.
+  const oldDepth = entry.path.length;
+  const newDepth = newParentEntry === null ? 0 : newParentEntry.path.length + 1;
+  if (oldDepth !== newDepth) stripLayout(entry.el as unknown as JsonValue);
+
   if (preserveWorld && (delta[0] !== 0 || delta[1] !== 0 || delta[2] !== 0)) {
     const el = entry.el;
     const shift = (v: Vec3Json): void => {
@@ -891,16 +897,34 @@ export interface ImportElementResult {
   names: Record<string, string>;
   /** Texture keys copied verbatim from the source document. */
   texturesCopied: string[];
-  /** Source key → fresh key, for keys that collided with a different path in the target. */
+  /**
+   * Source key → fresh key, for keys that collided in the target — either a different
+   * path, or the same path authored against a different UV space.
+   */
   texturesRemapped: Record<string, string>;
+  /**
+   * textureSizes overrides written so the imported faces keep resolving in the UV space
+   * they were authored against (the source's per-key size, else its textureWidth/Height).
+   */
+  textureSizesAdded: Record<string, [number, number]>;
+  /**
+   * Elements whose stepParentName was removed (new names). The field targets an element
+   * of the shape an OVERLAY is attached to; once the subtree is a real child here it is
+   * meaningless and, if this document were itself used as an overlay, harmful. Only
+   * stripped when importing under a parent — root-level imports may be assembling an
+   * overlay shape and keep it.
+   */
+  stepParentsStripped: string[];
 }
 
 /**
  * Kitbash: deep-copies a subtree from another document into this one (under `parent`, or
  * at root level). All names are unique-ified against the target. Texture map keys the
  * subtree references are copied when missing in the target; a key that exists in the
- * target with a DIFFERENT path is remapped to a fresh key (face refs in the copy are
- * rewritten) and reported. Matching textureSizes entries travel along.
+ * target with a different path — or the same path in a different UV space — is remapped
+ * to a fresh key (face refs in the copy are rewritten) and reported. When the source UV
+ * space (per-key textureSizes, else textureWidth/Height) differs from the target's
+ * textureWidth/Height, a textureSizes override is written so the imported UVs stay valid.
  */
 export function importElement(
   doc: ShapeDocument,
@@ -942,14 +966,40 @@ export function importElement(
 
   const texturesCopied: string[] = [];
   const texturesRemapped: Record<string, string> = {};
+  const textureSizesAdded: Record<string, [number, number]> = {};
   const srcTextures = fromDoc.root.textures ?? {};
-  const copySize = (fromKey: string, toKey: string): void => {
-    const size = fromDoc.root.textureSizes?.[fromKey];
-    if (size !== undefined) {
-      doc.root.textureSizes ??= {};
-      doc.root.textureSizes[toKey] = cloneJsonValue(size as unknown as JsonValue) as [VsNum, VsNum];
+
+  /** The UV space a key's face UVs are authored against in `root`. */
+  const spaceOf = (root: ShapeJson, key: string): [number, number] => {
+    const o = root.textureSizes?.[key];
+    if (o !== undefined) return [o[0].value, o[1].value];
+    return [root.textureWidth?.value ?? 16, root.textureHeight?.value ?? 16];
+  };
+  const targetDefault: [number, number] = [
+    doc.root.textureWidth?.value ?? 16,
+    doc.root.textureHeight?.value ?? 16,
+  ];
+  // Write an override when the source UV space differs from the target's default — the
+  // imported faces keep their source-space UVs and must keep resolving against it.
+  const ensureSize = (fromKey: string, toKey: string): void => {
+    const srcSpace = spaceOf(fromDoc.root, fromKey);
+    if (srcSpace[0] === targetDefault[0] && srcSpace[1] === targetDefault[1]) return;
+    doc.root.textureSizes ??= {};
+    doc.root.textureSizes[toKey] = [vsnum(srcSpace[0]), vsnum(srcSpace[1])];
+    textureSizesAdded[toKey] = srcSpace;
+  };
+  const remapRefs = (key: string, fresh: string): void => {
+    for (const el of subtree(copy)) {
+      for (const facing of FACE_NAMES) {
+        const face = el.faces?.[facing];
+        if (face === undefined) continue;
+        const raw = face.texture;
+        const k = raw.startsWith('#') ? raw.slice(1) : raw;
+        if (k === key) face.texture = raw.startsWith('#') ? `#${fresh}` : fresh;
+      }
     }
   };
+
   for (const key of refKeys) {
     const srcPath = srcTextures[key];
     if (srcPath === undefined) continue; // source doesn't define it either; the validator flags it
@@ -958,27 +1008,41 @@ export function importElement(
       doc.root.textures ??= {};
       doc.root.textures[key] = srcPath;
       texturesCopied.push(key);
-      copySize(key, key);
-    } else if (tgtPath !== srcPath) {
+      ensureSize(key, key);
+    } else {
+      const samePath = tgtPath === srcPath;
+      const srcSpace = spaceOf(fromDoc.root, key);
+      const tgtSpace = spaceOf(doc.root, key);
+      const sameSpace = srcSpace[0] === tgtSpace[0] && srcSpace[1] === tgtSpace[1];
+      if (samePath && sameSpace) continue; // identical texture in an identical UV space
+      // Different path, or same path authored against a different UV space: one key
+      // cannot serve both, so the imported faces move to a fresh key.
       const takenKeys = new Set(Object.keys(doc.root.textures ?? {}));
       const fresh = uniqueName(key, takenKeys);
       doc.root.textures ??= {};
       doc.root.textures[fresh] = srcPath;
       texturesRemapped[key] = fresh;
-      copySize(key, fresh);
-      for (const el of subtree(copy)) {
-        for (const facing of FACE_NAMES) {
-          const face = el.faces?.[facing];
-          if (face === undefined) continue;
-          const raw = face.texture;
-          const k = raw.startsWith('#') ? raw.slice(1) : raw;
-          if (k === key) face.texture = raw.startsWith('#') ? `#${fresh}` : fresh;
-        }
-      }
+      ensureSize(key, fresh);
+      remapRefs(key, fresh);
     }
-    // tgtPath === srcPath: same texture already present — nothing to do.
   }
 
+  // stepParentName targets an element of the shape an overlay is attached TO; as a real
+  // child of `parent` it is stale donor data (see ImportElementResult.stepParentsStripped).
+  const stepParentsStripped: string[] = [];
+  if (parentEntry !== null) {
+    for (const el of subtree(copy)) {
+      if (el.stepParentName !== undefined) {
+        delete el.stepParentName;
+        stepParentsStripped.push(el.name);
+      }
+    }
+  }
+
+  // The copy carries the source FILE's layout (absolute indentation, newline style); at
+  // its position in this document that would emit mis-indented. Canonical style instead.
+  stripLayout(copy as unknown as JsonValue);
+
   childListOf(doc, parentEntry?.el ?? null).push(copy);
-  return { names, texturesCopied, texturesRemapped };
+  return { names, texturesCopied, texturesRemapped, textureSizesAdded, stepParentsStripped };
 }

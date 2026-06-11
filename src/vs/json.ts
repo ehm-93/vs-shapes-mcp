@@ -954,6 +954,28 @@ export function cloneJsonValue(v: JsonValue): JsonValue {
   return cloned;
 }
 
+/**
+ * Recursively drops a subtree's hidden layout metadata so it re-serializes in canonical
+ * fresh style at whatever depth it now sits. Preserved layout embeds the SOURCE file's
+ * absolute indentation, so a parsed (or cloned) subtree moved to a different nesting
+ * depth — importElement, reparentElement — would otherwise emit with the old file's
+ * indent. Number literals (VsNum.raw) are kept: they are depth-independent.
+ */
+export function stripLayout(v: JsonValue): void {
+  if (v === null || typeof v !== 'object' || v instanceof VsNum) return;
+  docTrivia.delete(v);
+  if (Array.isArray(v)) {
+    arrayLayouts.delete(v);
+    for (const item of v) stripLayout(item as JsonValue);
+    return;
+  }
+  objectLayouts.delete(v);
+  for (const k of Object.keys(v)) {
+    const val = v[k];
+    if (val !== undefined) stripLayout(val);
+  }
+}
+
 function cloneNode(v: JsonValue): JsonValue {
   if (v instanceof VsNum) return new VsNum(v.value, v.raw);
   if (v === null || typeof v !== 'object') return v;

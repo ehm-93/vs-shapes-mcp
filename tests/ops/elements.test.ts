@@ -12,6 +12,7 @@ import {
   editElement,
   importElement,
   renameElement,
+  reparentElement,
 } from '../../src/vs/elements.js';
 import type { FaceName } from '../../src/vs/types.js';
 
@@ -271,16 +272,89 @@ describe('importElement', () => {
     expect(Object.keys(fromDoc.root.textures!)).toEqual(['skin', 'fur']);
   });
 
-  it('identical texture paths are left alone (no copy, no remap)', () => {
+  it('identical texture paths in an identical UV space are left alone (no copy, no remap)', () => {
     const doc = docOf(rig());
     const fromDoc = docOf({
+      textureWidth: 32,
+      textureHeight: 32,
       textures: { skin: 'entity/test/skin' },
       elements: [{ name: 'fin', from: [0, 0, 0], to: [1, 1, 1], faces: { north: { texture: '#skin', uv: [0, 0, 1, 1] } } }],
     });
     const result = importElement(doc, fromDoc, 'fin');
     expect(result.texturesCopied).toEqual([]);
     expect(result.texturesRemapped).toEqual({});
+    expect(result.textureSizesAdded).toEqual({});
     expect(doc.getElement('fin')!.faces!.north!.texture).toBe('#skin');
+  });
+
+  it('synthesizes a textureSizes override when the source shape-wide UV space differs', () => {
+    const doc = docOf(rig()); // 32×32
+    const fromDoc = docOf({
+      textureWidth: 60,
+      textureHeight: 76,
+      textures: { antler: 'entity/deer/antlers' },
+      elements: [
+        {
+          name: 'horn',
+          from: [0, 0, 0],
+          to: [1, 2, 1],
+          faces: { north: { texture: '#antler', uv: [44, 74, 45, 75] } },
+        },
+      ],
+    });
+    const result = importElement(doc, fromDoc, 'horn', { parent: 'body' });
+    expect(result.texturesCopied).toEqual(['antler']);
+    expect(result.textureSizesAdded).toEqual({ antler: [60, 76] });
+    expect(doc.root.textureSizes!['antler']!.map((v) => v.value)).toEqual([60, 76]);
+  });
+
+  it('same path authored against a different UV space is remapped to a fresh key with its own size', () => {
+    const doc = docOf(rig()); // skin: entity/test/skin in 32×32
+    const fromDoc = docOf({
+      textureWidth: 64,
+      textureHeight: 64,
+      textures: { skin: 'entity/test/skin' }, // same path, different UV space
+      elements: [
+        {
+          name: 'fin',
+          from: [0, 0, 0],
+          to: [1, 1, 1],
+          faces: { north: { texture: '#skin', uv: [40, 40, 42, 42] } },
+        },
+      ],
+    });
+    const result = importElement(doc, fromDoc, 'fin', { parent: 'body' });
+    expect(result.texturesRemapped).toEqual({ skin: 'skin2' });
+    expect(result.textureSizesAdded).toEqual({ skin2: [64, 64] });
+    expect(doc.root.textures!['skin2']).toBe('entity/test/skin');
+    expect(doc.getElement('fin')!.faces!.north!.texture).toBe('#skin2');
+  });
+
+  it('strips stepParentName when importing under a parent, keeps it for root-level imports', () => {
+    const overlay = (): unknown => ({
+      textureWidth: 32,
+      textureHeight: 32,
+      textures: { skin: 'entity/test/skin' },
+      elements: [
+        {
+          name: 'mount',
+          stepParentName: 'head',
+          from: [0, 0, 0],
+          to: [1, 1, 1],
+          children: [{ name: 'spike', stepParentName: 'other', from: [0, 0, 0], to: [1, 1, 1] }],
+        },
+      ],
+    });
+    const under = docOf(rig());
+    const r1 = importElement(under, docOf(overlay()), 'mount', { parent: 'body' });
+    expect(r1.stepParentsStripped).toEqual(['mount', 'spike']);
+    expect(under.getElement('mount')!.stepParentName).toBeUndefined();
+    expect(under.getElement('spike')!.stepParentName).toBeUndefined();
+
+    const atRoot = docOf(rig());
+    const r2 = importElement(atRoot, docOf(overlay()), 'mount');
+    expect(r2.stepParentsStripped).toEqual([]);
+    expect(atRoot.getElement('mount')!.stepParentName).toBe('head');
   });
 
   it('names unknown source elements against the SOURCE document', () => {
@@ -288,5 +362,91 @@ describe('importElement', () => {
     const fromDoc = docOf(sourceShape());
     expect(() => importElement(doc, fromDoc, 'tial')).toThrow(/did you mean 'tail'/);
     expect(() => importElement(doc, fromDoc, 'tial')).toThrow(/source document/);
+  });
+});
+
+describe('moved subtrees re-indent at their new depth', () => {
+  // Model-creator-style text with known tab depths: element items at 2 tabs (props 3),
+  // body>head children items at 4 tabs (props 5). A subtree imported/reparented under
+  // 'head' must emit its props at 7 tabs — not at the depth its SOURCE file had.
+  const targetText = [
+    '{',
+    '\t"textureWidth": 32,',
+    '\t"textureHeight": 32,',
+    '\t"textures": {',
+    '\t\t"skin": "entity/test/skin"',
+    '\t},',
+    '\t"elements": [',
+    '\t\t{',
+    '\t\t\t"name": "body",',
+    '\t\t\t"from": [ 0.0, 0.0, 0.0 ],',
+    '\t\t\t"to": [ 4.0, 4.0, 4.0 ],',
+    '\t\t\t"children": [',
+    '\t\t\t\t{',
+    '\t\t\t\t\t"name": "head",',
+    '\t\t\t\t\t"from": [ 0.0, 0.0, 0.0 ],',
+    '\t\t\t\t\t"to": [ 2.0, 2.0, 2.0 ]',
+    '\t\t\t\t}',
+    '\t\t\t]',
+    '\t\t},',
+    '\t\t{',
+    '\t\t\t"name": "tail",',
+    '\t\t\t"from": [ 0.0, 0.0, 4.0 ],',
+    '\t\t\t"to": [ 1.0, 1.0, 8.0 ]',
+    '\t\t},',
+    '\t\t{',
+    '\t\t\t"name": "base",',
+    '\t\t\t"from": [ 8.0, 0.0, 0.0 ],',
+    '\t\t\t"to": [ 9.0, 1.0, 1.0 ]',
+    '\t\t}',
+    '\t]',
+    '}',
+  ].join('\r\n');
+  const sourceText = [
+    '{',
+    '\t"textureWidth": 32,',
+    '\t"textureHeight": 32,',
+    '\t"textures": {',
+    '\t\t"skin": "entity/test/skin"',
+    '\t},',
+    '\t"elements": [',
+    '\t\t{',
+    '\t\t\t"name": "horn",',
+    '\t\t\t"from": [ 0.0, 0.0, 0.0 ],',
+    '\t\t\t"to": [ 1.0, 2.0, 1.0 ],',
+    '\t\t\t"children": [',
+    '\t\t\t\t{',
+    '\t\t\t\t\t"name": "tip",',
+    '\t\t\t\t\t"from": [ 0.0, 2.0, 0.0 ],',
+    '\t\t\t\t\t"to": [ 1.0, 3.0, 1.0 ]',
+    '\t\t\t\t}',
+    '\t\t\t]',
+    '\t\t}',
+    '\t]',
+    '}',
+  ].join('\r\n');
+
+  it('importElement emits the copy at the target depth, not the source-file depth', () => {
+    const doc = ShapeDocument.parse(targetText);
+    const fromDoc = ShapeDocument.parse(sourceText);
+    importElement(doc, fromDoc, 'horn', { parent: 'head' });
+    const out = doc.serialize();
+    // horn props live under elements[0].children[0].children[0] → 7 tabs; tip → 9 tabs.
+    expect(out).toMatch(/\r\n\t{7}"name": "horn"/);
+    expect(out).toMatch(/\r\n\t{9}"name": "tip"/);
+    // The source file authored them at 3 and 5 tabs — the old mis-indent must be gone.
+    expect(out).not.toMatch(/\r\n\t{3}"name": "horn"/);
+  });
+
+  it('reparentElement re-indents on depth change and keeps bytes on same-depth moves', () => {
+    const doc = ShapeDocument.parse(targetText);
+    reparentElement(doc, 'tail', 'head'); // root level (3-tab props) → under head (7-tab props)
+    const out = doc.serialize();
+    expect(out).toMatch(/\r\n\t{7}"name": "tail"/);
+    expect(out).not.toMatch(/\r\n\t{3}"name": "tail"/);
+
+    const doc2 = ShapeDocument.parse(targetText);
+    reparentElement(doc2, 'head', 'base'); // depth 1 → depth 1: preserved layout keeps its bytes
+    expect(doc2.serialize()).toContain('\t\t\t\t\t"name": "head",');
   });
 });

@@ -2,7 +2,7 @@
   "name": "vs-shapes-mcp",
   "version": "0.1.0",
   "description": "MCP server for editing, animating, validating, and rendering Vintage Story shape files",
-  "license": "MIT",
+  "license": "MIT-0",
   "author": "Emmett Miller",
   "type": "module",
   "bin": {
