@@ -98,6 +98,31 @@ describe('render savePath export', () => {
   });
 });
 
+describe('render_gif', () => {
+  it('returns an inline GIF, and writes one to disk via savePath', async () => {
+    const { client, call } = await connect();
+    try {
+      const docId = await rigDoc(call);
+      await call('anim_create', { docId, code: 'spin', quantityFrames: 8, anchorElements: ['body'] });
+      await call('anim_set_keyframe', { docId, code: 'spin', frame: 4, element: 'body', rotation: [0, 90, 0] });
+
+      const inline = await call('render_gif', { docId, anim: 'spin', frames: 6, size: 48 });
+      expect(inline.isError ?? false).toBe(false);
+      const img = inline.content.find((c) => c.type === 'image');
+      expect(img?.mimeType).toBe('image/gif');
+      expect(Buffer.from(img!.data!, 'base64').subarray(0, 6).toString('latin1')).toBe('GIF89a');
+
+      const out = join(tmp, 'spin.gif');
+      const saved = await call('render_gif', { docId, anim: 'spin', frames: 6, size: 48, savePath: out });
+      expect(saved.content.some((c) => c.type === 'image')).toBe(false);
+      expect(existsSync(out)).toBe(true);
+      expect(readFileSync(out).subarray(0, 6).toString('latin1')).toBe('GIF89a');
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 describe('grouped validation in mutate responses', () => {
   it('collapses repeated same-code findings into one counted entry', async () => {
     const { client, call } = await connect();

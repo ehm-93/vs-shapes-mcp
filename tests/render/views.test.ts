@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
 import { describe, expect, it } from 'vitest';
 
-import { HITBOX_RGBA, faceBrightness, renderFilmstrip, renderViews } from '../../src/render/views.js';
+import { HITBOX_RGBA, faceBrightness, renderFilmstrip, renderGif, renderViews } from '../../src/render/views.js';
 import { VsNum, type ShapeJson } from '../../src/vs/types.js';
 
 /** Deep-wraps every number into a VsNum, mimicking the lossless parser's output. */
@@ -204,6 +204,64 @@ describe('renderViews — synthetic shapes (no corpus needed)', () => {
     );
     await expect(renderViews(cubeDoc, { size: 7, renderer: 'software' })).rejects.toThrow(
       /size must be an integer between 32 and 2048/,
+    );
+  });
+});
+
+const spinDoc = makeDoc({
+  textureWidth: 16,
+  textureHeight: 16,
+  textures: { bogus: 'does/not/exist' },
+  elements: [{ name: 'cube', from: [4, 0, 4], to: [12, 8, 12], rotationOrigin: [8, 4, 8], faces: allFaces('#bogus') }],
+  animations: [
+    {
+      name: 'spin',
+      code: 'spin',
+      quantityframes: 8,
+      onAnimationEnd: 'Repeat',
+      keyframes: [
+        { frame: 0, elements: { cube: { rotationX: 0, rotationY: 0, rotationZ: 0 } } },
+        { frame: 4, elements: { cube: { rotationX: 0, rotationY: 90, rotationZ: 0 } } },
+      ],
+    },
+  ],
+});
+
+describe('renderGif (no corpus needed)', () => {
+  it('encodes a looping GIF89a with the requested frame count, size, and per-frame delay', async () => {
+    const r = await renderGif(spinDoc, { anim: 'spin', frames: 8, size: 64, fps: 20, renderer: 'software' });
+    expect(r.gif.subarray(0, 6).toString('latin1')).toBe('GIF89a');
+    // logical screen dimensions are little-endian at bytes 6..9
+    expect(r.gif.readUInt16LE(6)).toBe(64);
+    expect(r.gif.readUInt16LE(8)).toBe(64);
+    expect(r.frameCount).toBe(8);
+    expect(r.caption).toContain('20 fps');
+    expect(r.caption).toContain('50ms/frame'); // 1000/20
+    expect(r.caption).toContain('looping');
+    expect(r.gif.length).toBeGreaterThan(200);
+  });
+
+  it('is byte-deterministic on the software backend', async () => {
+    const a = await renderGif(spinDoc, { anim: 'spin', frames: 6, size: 48, renderer: 'software' });
+    const b = await renderGif(spinDoc, { anim: 'spin', frames: 6, size: 48, renderer: 'software' });
+    expect(Buffer.compare(a.gif, b.gif)).toBe(0);
+  });
+
+  it('defaults frames to min(quantityFrames, 48) and reports missing textures', async () => {
+    const r = await renderGif(spinDoc, { anim: 'spin', size: 48, renderer: 'software' });
+    expect(r.frameCount).toBe(8); // quantityFrames
+    expect(r.missingTextures).toEqual(['bogus']);
+  });
+
+  it('rejects unknown animations and out-of-range frames/fps with named errors', async () => {
+    await expect(renderGif(spinDoc, { anim: 'nope', renderer: 'software' })).rejects.toThrow(
+      /animation 'nope' not found/,
+    );
+    await expect(renderGif(spinDoc, { anim: 'spin', frames: 999, renderer: 'software' })).rejects.toThrow(
+      /frames must be an integer between 1 and 120/,
+    );
+    await expect(renderGif(spinDoc, { anim: 'spin', fps: 0, renderer: 'software' })).rejects.toThrow(
+      /fps must be between 1 and 60/,
     );
   });
 });

@@ -30,6 +30,12 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { PNG } from 'pngjs';
+import { createRequire } from 'node:module';
+// gifenc is CJS, and its ESM-interop shape differs between Node-native and esbuild/vitest;
+// createRequire loads the real module.exports identically in both.
+const { GIFEncoder, applyPalette, quantize } = createRequire(import.meta.url)(
+  'gifenc',
+) as typeof import('gifenc');
 
 import { initCorpus, type Corpus } from '../corpus/corpus.js';
 import { modelBounds, posedFaces, rootOf, type PoseOpts, type ShapeDocLike } from '../vs/fk.js';
@@ -141,6 +147,32 @@ export interface RenderFilmstripOpts {
   view?: ViewName;
   /** Pixels per square tile, default 240. */
   size?: number;
+  texturesRoot?: string;
+  renderer?: BackendPreference;
+}
+
+export interface RenderGifResult {
+  /** Animated GIF89a bytes. */
+  gif: Buffer;
+  missingTextures: string[];
+  caption: string;
+  frameCount: number;
+}
+
+export interface RenderGifOpts {
+  anim: string;
+  /**
+   * Frames sampled evenly over [0, quantityframes). Default min(quantityframes, 48).
+   * Sampling every source frame at the playback fps reproduces engine speed exactly.
+   */
+  frames?: number;
+  view?: ViewName;
+  /** Pixels per square frame, default 200. */
+  size?: number;
+  /** Playback frames per second (the engine convention is 30). Default 30. */
+  fps?: number;
+  /** Loop forever (default true); false plays once. */
+  loop?: boolean;
   texturesRoot?: string;
   renderer?: BackendPreference;
 }
@@ -574,4 +606,104 @@ export async function renderFilmstrip(
     (missing.length > 0 ? ` | missing textures: ${missing.join(', ')}` : '');
 
   return { png: encodePng(canvas), missingTextures: missing, caption };
+}
+
+/**
+ * Renders an animation as a looping GIF89a. Each sampled frame is rendered to its own
+ * full canvas (shared camera fit across the cycle, ground line, no labels), then the
+ * frames are colour-quantized to a single global 256-colour palette (consistent colours,
+ * no inter-frame flicker) and LZW-encoded. Sampling every source frame at the playback
+ * fps reproduces the engine's on-screen speed exactly.
+ */
+export async function renderGif(doc: ShapeDocLike, opts: RenderGifOpts): Promise<RenderGifResult> {
+  const root = rootOf(doc);
+  const anims = root.animations ?? [];
+  const anim: AnimationJson | undefined = anims.find((a) => (a.code ?? a.name) === opts.anim);
+  if (anim === undefined) {
+    const codes = anims.map((a) => a.code ?? a.name);
+    throw new Error(
+      `renderGif: animation '${opts.anim}' not found; ` +
+        (codes.length > 0 ? `available animation codes: ${codes.join(', ')}.` : `the shape has no animations.`),
+    );
+  }
+  const quantityFrames = anim.quantityframes.value;
+  const count = opts.frames ?? Math.min(quantityFrames, 48);
+  if (!Number.isInteger(count) || count < 1 || count > 120) {
+    throw new Error(`renderGif: frames must be an integer between 1 and 120, got ${count}`);
+  }
+  const size = opts.size ?? 200;
+  validateSize(size, 'renderGif');
+  const fps = opts.fps ?? 30;
+  if (!Number.isFinite(fps) || fps < 1 || fps > 60) {
+    throw new Error(`renderGif: fps must be between 1 and 60, got ${fps}`);
+  }
+  const loop = opts.loop ?? true;
+  const view = opts.view ?? 'e';
+  const frames = Array.from({ length: count }, (_, i) => (i * quantityFrames) / count);
+
+  const bounds = modelBounds(root, { anim: opts.anim, frames });
+  const { center, extent } = fitOrthoExtent(bounds.min, bounds.max, 0.1);
+  const texSet = createTextureSet(root, buildResolvers(opts.texturesRoot));
+  const backend = await selectBackend(opts.renderer ?? 'auto');
+
+  const { yawDeg, pitchDeg } = viewToYawPitch(view);
+  const camera = createOrthoCamera({ yawDeg, pitchDeg, center, extent, viewport: { w: size, h: size } });
+  const yawRad = (yawDeg * Math.PI) / 180;
+  const right: Vec3 = [-Math.cos(yawRad), 0, Math.sin(yawRad)];
+  const zBias = extent * 1e-3;
+  const groundLine: SceneLine = {
+    a: screenVertex(camera, [center[0] - right[0] * extent, 0, center[2] - right[2] * extent], 0, 0, zBias),
+    b: screenVertex(camera, [center[0] + right[0] * extent, 0, center[2] + right[2] * extent], 0, 0, zBias),
+    rgba: GRID_RGBA,
+    depthTest: true,
+  };
+
+  // Render every frame to its own RGBA buffer.
+  const rendered: Uint8ClampedArray[] = [];
+  for (const frame of frames) {
+    const faces = posedFaces(root, { anim: opts.anim, frame });
+    const job: SceneJob = {
+      width: size,
+      height: size,
+      clear: BG,
+      textures: texSet.textures,
+      tris: buildModelTris(faces, camera, texSet),
+      lines: [groundLine],
+    };
+    rendered.push(await backend.renderScene(job));
+  }
+
+  // One global palette, built from a bounded sample of frames so colours stay stable
+  // across the loop (per-frame palettes would shimmer). All frames are opaque (the
+  // backend clears to BG and discards alpha-cutout fragments), so no transparency.
+  const sampleStride = Math.max(1, Math.floor(rendered.length / 12));
+  const sampleFrames: Uint8ClampedArray[] = [];
+  for (let i = 0; i < rendered.length; i += sampleStride) sampleFrames.push(rendered[i]!);
+  const sample = new Uint8Array(sampleFrames.reduce((n, f) => n + f.length, 0));
+  let off = 0;
+  for (const f of sampleFrames) {
+    sample.set(f, off);
+    off += f.length;
+  }
+  const palette = quantize(sample, 256, { format: 'rgb565' });
+
+  const enc = GIFEncoder();
+  const delay = Math.round(1000 / fps);
+  for (let i = 0; i < rendered.length; i++) {
+    const index = applyPalette(new Uint8Array(rendered[i]!.buffer.slice(0)), palette, 'rgb565');
+    enc.writeFrame(index, size, size, {
+      palette,
+      delay,
+      ...(i === 0 ? { repeat: loop ? 0 : -1 } : {}),
+    });
+  }
+  enc.finish();
+
+  const missing = [...texSet.missing];
+  const caption =
+    `gif anim '${opts.anim}' view ${view} | ${count} frames over ${quantityFrames} at ${fps} fps ` +
+    `(${delay}ms/frame, ${loop ? 'looping' : 'once'}) | ${size}px | backend ${backend.name}` +
+    (missing.length > 0 ? ` | missing textures: ${missing.join(', ')}` : '');
+
+  return { gif: Buffer.from(enc.bytes()), missingTextures: missing, caption, frameCount: count };
 }

@@ -63,7 +63,7 @@ corpus tools error clearly and renders fall back to deterministic flat colors.
 | Geometry | `element_add`, `element_edit`, `element_rename` (cascades into keyframes), `element_reparent`, `element_mirror`, `element_scale`, `element_delete`, `element_duplicate`, `element_import` |
 | Animation | `anim_list`, `anim_describe`, `anim_create`, `anim_delete`, `anim_edit_meta`, `anim_set_keyframe`, `anim_delete_keyframe`, `anim_adjust`, `anim_retime`, `anim_mirror_phase` |
 | UV / faces | `uv_report`, `uv_set_face`, `uv_auto` (incremental with `elements`), `face_set` (bulk texture/glow/enabled) |
-| Perception | `render_views`, `render_filmstrip` (both export to disk via `savePath`) |
+| Perception | `render_views`, `render_filmstrip`, `render_gif` (looping animation; all export to disk via `savePath`) |
 | Validation | `validate_run` (also runs after every mutation) |
 | Corpus | `corpus_search`, `corpus_describe` |
 | Escape hatch | `doc_get_json`, `doc_patch_json` (RFC 6902, transactional, fully validated) |

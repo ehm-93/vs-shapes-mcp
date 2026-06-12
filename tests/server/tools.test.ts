@@ -72,7 +72,7 @@ const EXPECTED_TOOLS = [
   'anim_create', 'anim_delete', 'anim_edit_meta', 'anim_set_keyframe', 'anim_delete_keyframe',
   'anim_adjust', 'anim_retime', 'anim_mirror_phase',
   'uv_report', 'uv_set_face', 'uv_auto', 'face_set',
-  'render_views', 'render_filmstrip',
+  'render_views', 'render_filmstrip', 'render_gif',
   'validate_run',
   'corpus_search', 'corpus_describe',
   'doc_get_json', 'doc_patch_json',

@@ -29,7 +29,7 @@ import { z } from 'zod';
 
 import { initCorpus, type Corpus } from './corpus/corpus.js';
 import type { BackendPreference } from './render/backend.js';
-import { renderFilmstrip, renderViews, type ViewName } from './render/views.js';
+import { renderFilmstrip, renderGif, renderViews, type ViewName } from './render/views.js';
 import { Session, type ManagedDoc } from './session.js';
 import {
   adjustChannel,
@@ -1867,10 +1867,11 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
   // =====================================================================================
 
   const renderResultContent = (
-    png: Buffer,
+    image: Buffer,
     caption: string,
     missing: string[],
     savePath?: string,
+    mimeType = 'image/png',
   ): CallToolResult => {
     let text = caption;
     if (missing.length > 0) {
@@ -1883,15 +1884,15 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
     }
     if (savePath !== undefined) {
       // Export mode: the file is the artifact — skip the inline image to keep the
-      // response small (open the PNG to inspect it).
+      // response small (open the file to inspect it).
       const abs = resolve(savePath);
       mkdirSync(dirname(abs), { recursive: true });
-      writeFileSync(abs, png);
-      return { content: [{ type: 'text', text: `Saved render to ${abs} (${png.length} bytes)\n${text}` }] };
+      writeFileSync(abs, image);
+      return { content: [{ type: 'text', text: `Saved render to ${abs} (${image.length} bytes)\n${text}` }] };
     }
     return {
       content: [
-        { type: 'image', data: png.toString('base64'), mimeType: 'image/png' },
+        { type: 'image', data: image.toString('base64'), mimeType },
         { type: 'text', text },
       ],
     };
@@ -1996,6 +1997,55 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
         renderer,
       });
       return renderResultContent(result.png, result.caption, result.missingTextures, savePath);
+    }),
+  );
+
+  server.registerTool(
+    'render_gif',
+    {
+      description:
+        'Render an animation as a looping GIF: frames sampled evenly over the cycle, one global ' +
+        'palette (no inter-frame flicker), played at the chosen fps. Sampling every source frame ' +
+        'at 30 fps reproduces the engine speed. Returns the GIF inline, or pass savePath to write ' +
+        'it to disk (recommended — animated GIFs do not preview in every client).',
+      inputSchema: {
+        docId: docIdParam,
+        anim: z.string().describe('Animation code to render.'),
+        frames: z
+          .number()
+          .int()
+          .optional()
+          .describe('Frames sampled over [0, quantityFrames), 1–120. Default min(quantityFrames, 48).'),
+        view: z
+          .enum(VIEW_VALUES)
+          .optional()
+          .describe("View for every frame (side the camera looks AT; north = −Z). Default 'e'."),
+        size: z.number().int().optional().describe('Pixels per square frame, 32–2048 (default 200).'),
+        fps: z
+          .number()
+          .optional()
+          .describe('Playback frames per second, 1–60 (the engine convention is 30). Default 30.'),
+        loop: z.boolean().optional().describe('Loop forever (default true); false plays once.'),
+        texturesRoot: z
+          .string()
+          .optional()
+          .describe('Extra directory to resolve texture PNGs (mod assets); game assets always fall back.'),
+        savePath: savePathParam,
+      },
+    },
+    guard(async ({ docId, anim, frames, view, size, fps, loop, texturesRoot, savePath }) => {
+      const m = session.get(docId);
+      const result = await renderGif(m.doc, {
+        anim,
+        ...(frames !== undefined ? { frames } : {}),
+        ...(view !== undefined ? { view: view as ViewName } : {}),
+        ...(size !== undefined ? { size } : {}),
+        ...(fps !== undefined ? { fps } : {}),
+        ...(loop !== undefined ? { loop } : {}),
+        ...(texturesRoot !== undefined ? { texturesRoot } : {}),
+        renderer,
+      });
+      return renderResultContent(result.gif, result.caption, result.missingTextures, savePath, 'image/gif');
     }),
   );
 
