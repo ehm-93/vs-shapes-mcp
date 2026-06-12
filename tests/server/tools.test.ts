@@ -76,7 +76,7 @@ const EXPECTED_TOOLS = [
   'palette_extract',
   'validate_run',
   'corpus_search', 'corpus_describe',
-  'doc_get_json', 'doc_patch_json',
+  'doc_get_json', 'doc_patch_json', 'doc_script',
 ] as const;
 
 describe('tools/list', () => {

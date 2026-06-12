@@ -33,6 +33,7 @@ src/
     elements.ts        geometry ops (add/edit/rename/reparent/mirror/...) (owner: doc)
     uv.ts              uv report + simple per-face auto-UV                (owner: doc)
     animation.ts       anim CRUD ops (create/set_key/adjust/retime/...)   (owner: doc)
+    jsonpatch.ts       RFC-6902 patch + pointer nav + lossless⇄plain      (owner: doc)
     transform.ts       Mat4 + GetLocalTransformMatrix port                (owner: fk)
     fk.ts              pose evaluation: doc + (anim, frame) → world boxes/faces (owner: fk)
     validate.ts        validation suite                                   (owner: validate)
@@ -44,6 +45,10 @@ src/
     backend.ts         SceneJob type + backend selection (gpu→software)   (owner: views)
     textures.ts        texture loading, k-scale, fallback flat colors     (owner: views)
     views.ts           view grid / filmstrip composition → PNG buffer     (owner: views)
+    palette.ts         model texture colors → ranked palette              (owner: views)
+  script/
+    interp.ts          sandboxed JS-subset interpreter (acorn AST walk)   (owner: script)
+    api.ts             doc_script API surface bound to a ShapeDocument    (owner: script)
   corpus/
     corpus.ts          game asset discovery, search, stats                (owner: corpus)
 tests/                 vitest; one file per module + acceptance/
@@ -298,7 +303,8 @@ grouping:
 | `palette_extract` (maxColors?, exact?) | render/palette.ts — model texture colors → ranked palette |
 | `validate_run` (level) | validate |
 | `corpus_search` / `corpus_describe` / (open via `shape_open` `corpus:` path) | corpus |
-| `doc_get_json` (jsonPointer?) / `doc_patch_json` (RFC-6902 patch) | escape hatch; patch runs in a transaction, full validation after |
+| `doc_get_json` (jsonPointer?) / `doc_patch_json` (RFC-6902 patch) | escape hatch; patch runs in a transaction, full validation after (engine in vs/jsonpatch.ts) |
+| `doc_script` (script, args?, seed?) | script/api.ts — procedural mutation: a sandboxed JS-subset script (script/interp.ts) over the full ops API + raw JSON, one transaction, full validation after |
 
 zod schemas: every tool input fully described (`.describe()` on every field) — the schema IS
 the agent-facing documentation. Vec3s as `[x, y, z]` number tuples.
