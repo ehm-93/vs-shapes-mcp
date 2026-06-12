@@ -214,6 +214,14 @@ export interface KeyframePose {
   rotation?: Vec3 | null;
   /** Scale factors (neutral 1). */
   stretch?: Vec3 | null;
+  /**
+   * Per-axis shortest-angular-path flags for the rotation lerp out of this keyframe
+   * (GROUND-TRUTH §6 — continuous rotators like gears need them at the cycle wrap).
+   * Given axes are set/removed individually; null removes all three. Only meaningful
+   * when the entry also has a rotation channel (the engine reads them off the LEFT
+   * rotation keyframe).
+   */
+  rotShortestDistance?: { x?: boolean; y?: boolean; z?: boolean } | null;
 }
 
 /**
@@ -246,10 +254,10 @@ export function setKeyframe(
     );
   }
   const channels = (['offset', 'rotation', 'stretch'] as const).filter((c) => pose[c] !== undefined);
-  if (channels.length === 0) {
+  if (channels.length === 0 && pose.rotShortestDistance === undefined) {
     throw new Error(
       `${op}: the pose for '${element}' sets no channels — pass offset/rotation/stretch as a ` +
-        `[x, y, z] triple to set, or null to clear`,
+        `[x, y, z] triple to set (or null to clear), and/or rotShortestDistance flags`,
     );
   }
   for (const channel of channels) {
@@ -279,6 +287,19 @@ export function setKeyframe(
       for (const f of fields) delete entry[f];
     } else {
       for (let i = 0; i < 3; i++) entry[fields[i]!] = vsnum(v[i]!);
+    }
+  }
+  if (pose.rotShortestDistance !== undefined) {
+    const FLAGS = ['rotShortestDistanceX', 'rotShortestDistanceY', 'rotShortestDistanceZ'] as const;
+    if (pose.rotShortestDistance === null) {
+      for (const f of FLAGS) delete entry[f];
+    } else {
+      for (const [axis, field] of [['x', FLAGS[0]], ['y', FLAGS[1]], ['z', FLAGS[2]]] as const) {
+        const v = pose.rotShortestDistance[axis];
+        if (v === undefined) continue;
+        if (v) entry[field] = true;
+        else delete entry[field];
+      }
     }
   }
   // The entry was mutated IN PLACE: if the source file duplicated this element's key in
@@ -534,21 +555,54 @@ export interface MirrorPhaseResult {
 }
 
 /**
+ * Mirror-conjugates one keyframe entry across the sagittal plane normal to `axis`,
+ * matching element_mirror's rotation rules: a 'z' mirror negates rotationX/rotationY and
+ * offsetZ (keeps rotationZ); an 'x' mirror negates rotationY/rotationZ and offsetX
+ * (keeps rotationX). Stretch and rotShortestDistance flags are unchanged.
+ */
+function conjugateEntry(entry: KeyFrameElementJson, axis: 'x' | 'z'): void {
+  const negate = (field: keyof KeyFrameElementJson): void => {
+    const v = entry[field];
+    if (v !== undefined && typeof v === 'object' && 'value' in v) {
+      (entry as Record<string, unknown>)[field] = vsnum(-v.value);
+    }
+  };
+  if (axis === 'z') {
+    negate('rotationX');
+    negate('rotationY');
+    negate('offsetZ');
+  } else {
+    negate('rotationY');
+    negate('rotationZ');
+    negate('offsetX');
+  }
+}
+
+/**
  * Contralateral phase copy for gait cycles: for every keyframe with frame < q/2, writes
  * (replacing any existing keyframe) frame + q/2 where each [a, b] pair's channel values
  * are swapped (a's entry is written under b and vice versa) and unpaired elements are
  * copied as-is. Requires an even quantityframes.
  *
- * NO sign flips are applied to any channel: on a left/right-symmetric rig the
- * contralateral half-cycle pose IS the swapped pose. If your rig needs mirrored signs
- * (e.g. asymmetric Z-offsets), follow up with adjustChannel on the affected elements.
+ * `axis` (default 'z' — VS creatures are z-symmetric) mirror-conjugates every copied
+ * entry across the sagittal plane, exactly like element_mirror conjugates static
+ * rotations: for 'z', rotationX/rotationY and offsetZ negate while rotationZ holds.
+ * That makes the copy correct for any keyed channel — quadruped/biped rotZ swings pass
+ * through unchanged, while spider-style rotX/rotY lifts and lateral sways flip as the
+ * contralateral side requires (unpaired elements like tails and heads flip too, which is
+ * what an alternating gait wants). Pass 'none' for a verbatim copy (legacy behavior).
  */
 export function mirrorPhase(
   doc: ShapeDocument,
   code: string,
   pairs: [string, string][],
+  opts: { axis?: 'x' | 'z' | 'none' } = {},
 ): MirrorPhaseResult {
   const op = 'mirrorPhase';
+  const axis = opts.axis ?? 'z';
+  if (axis !== 'x' && axis !== 'z' && axis !== 'none') {
+    throw new Error(`${op}: axis must be 'x', 'z' or 'none', got ${JSON.stringify(axis)}`);
+  }
   const anim = requireAnimation(doc, code, op);
   const q = anim.quantityframes.value;
   if (!Number.isInteger(q) || q < 2 || q % 2 !== 0) {
@@ -585,7 +639,9 @@ export function mirrorPhase(
     const elements: KeyFrameJson['elements'] = {};
     for (const [name, entry] of Object.entries(src.elements ?? {})) {
       const targetName = pairMap.get(name) ?? name;
-      elements[targetName] = cloneJsonValue(entry as unknown as JsonValue) as KeyFrameElementJson;
+      const copy = cloneJsonValue(entry as unknown as JsonValue) as KeyFrameElementJson;
+      if (axis !== 'none') conjugateEntry(copy, axis);
+      elements[targetName] = copy;
     }
     const existingIdx = keyframes.findIndex((kf) => kf.frame.value === targetFrame);
     if (existingIdx !== -1) keyframes.splice(existingIdx, 1);

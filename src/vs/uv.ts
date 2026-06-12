@@ -319,6 +319,101 @@ export function setFaceUv(
 }
 
 // ---------------------------------------------------------------------------
+// setFaceProps
+// ---------------------------------------------------------------------------
+
+export interface FacePropsPatch {
+  /**
+   * Texture key ('skin' or '#skin'). The key is not required to exist in the textures
+   * map (some shapes rely on entity-supplied keys, e.g. vanilla's '#null'); fast
+   * validation flags dangling refs after the call.
+   */
+  texture?: string;
+  /** Glow 0–255 (brightness floor); null or 0 removes the field. */
+  glow?: number | null;
+  /** false disables the face (the engine drops it at load); true or null restores the default. */
+  enabled?: boolean | null;
+}
+
+export interface SetFacePropsResult {
+  /** element name → faces updated, in document order. */
+  updated: Record<string, FaceName[]>;
+  facesUpdated: number;
+}
+
+/**
+ * Edits properties of EXISTING faces (texture key, glow, enabled) across one or more
+ * elements — optionally whole subtrees — without touching UV rects. Faces are never
+ * created here (creating a face needs a uv rect: use setFaceUv or addElement).
+ */
+export function setFaceProps(
+  doc: ShapeDocument,
+  elements: string[],
+  props: FacePropsPatch,
+  opts: { faces?: FaceName[]; subtree?: boolean } = {},
+): SetFacePropsResult {
+  const op = 'setFaceProps';
+  if (!Array.isArray(elements) || elements.length === 0) {
+    throw new Error(`${op}: pass at least one element name`);
+  }
+  if (props.texture === undefined && props.glow === undefined && props.enabled === undefined) {
+    throw new Error(`${op}: nothing to change — pass texture, glow and/or enabled`);
+  }
+  if (typeof props.glow === 'number' && (!Number.isFinite(props.glow) || props.glow < 0 || props.glow > 255)) {
+    throw new Error(`${op}: glow must be 0–255 (the engine packs it into a byte), got ${props.glow}`);
+  }
+  const which = opts.faces ?? [...FACE_NAMES];
+  for (const f of which) {
+    if (!FACE_NAMES.includes(f)) {
+      throw new Error(`${op}: ${describeUnknown('face', String(f), [...FACE_NAMES], 'the faces filter')}`);
+    }
+  }
+
+  const targets: ElementJson[] = [];
+  const seen = new Set<ElementJson>();
+  for (const name of elements) {
+    const stack: ElementJson[] = [requireElement(doc, name, op)];
+    while (stack.length > 0) {
+      const el = stack.pop()!;
+      if (seen.has(el)) continue;
+      seen.add(el);
+      targets.push(el);
+      if (opts.subtree === true) for (const c of el.children ?? []) stack.push(c);
+    }
+  }
+
+  const updated: Record<string, FaceName[]> = {};
+  let facesUpdated = 0;
+  for (const el of targets) {
+    for (const facing of which) {
+      const face = el.faces?.[facing];
+      if (face === undefined) continue;
+      if (props.texture !== undefined) {
+        face.texture = props.texture.startsWith('#') ? props.texture : `#${props.texture}`;
+      }
+      if (props.glow !== undefined) {
+        if (props.glow === null || props.glow === 0) delete face.glow;
+        else face.glow = vsnum(props.glow);
+      }
+      if (props.enabled !== undefined) {
+        if (props.enabled === false) face.enabled = false;
+        else delete face.enabled;
+      }
+      (updated[el.name] ??= []).push(facing);
+      facesUpdated++;
+    }
+  }
+  if (facesUpdated === 0) {
+    throw new Error(
+      `${op}: no matching faces on ${elements.map((n) => `'${n}'`).join(', ')}` +
+        `${opts.subtree === true ? ' (or descendants)' : ''} for [${which.join(', ')}] — faces are ` +
+        `only edited here, not created (use setFaceUv or addElement to create them)`,
+    );
+  }
+  return { updated, facesUpdated };
+}
+
+// ---------------------------------------------------------------------------
 // autoUv
 // ---------------------------------------------------------------------------
 
@@ -365,16 +460,120 @@ function shelfPack(items: PackItem[], width: number, height: number): Map<PackIt
 }
 
 /**
- * Re-packs the per-face uv rects of the given elements (default: every element) with a
- * shelf packer, one independent sheet per texture key (faces of different textures may
+ * First-fit placement into free sheet space at 0.5-unit granularity, avoiding the
+ * `occupied` rects (the layout of faces that are NOT being repacked).
+ */
+function freeSpacePack(
+  items: PackItem[],
+  occupied: UvRect[],
+  width: number,
+  height: number,
+): Map<PackItem, [number, number]> | null {
+  const G = 2; // grid cells per shape unit
+  const gw = Math.max(1, Math.ceil(width * G));
+  const gh = Math.max(1, Math.ceil(height * G));
+  const grid = new Uint8Array(gw * gh);
+  const mark = (r: UvRect): void => {
+    const x0 = Math.max(0, Math.floor(Math.min(r[0], r[2]) * G));
+    const y0 = Math.max(0, Math.floor(Math.min(r[1], r[3]) * G));
+    const x1 = Math.min(gw, Math.ceil(Math.max(r[0], r[2]) * G));
+    const y1 = Math.min(gh, Math.ceil(Math.max(r[1], r[3]) * G));
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) grid[y * gw + x] = 1;
+  };
+  for (const r of occupied) mark(r);
+  const placed = new Map<PackItem, [number, number]>();
+  for (const item of items) {
+    const cw = Math.ceil(item.w * G);
+    const ch = Math.ceil(item.h * G);
+    let pos: [number, number] | null = null;
+    outer: for (let y = 0; y + ch <= gh; y++) {
+      for (let x = 0; x + cw <= gw; x++) {
+        let free = true;
+        scan: for (let yy = y; yy < y + ch; yy++) {
+          for (let xx = x; xx < x + cw; xx++) {
+            if (grid[yy * gw + xx] !== 0) {
+              free = false;
+              break scan;
+            }
+          }
+        }
+        if (free) {
+          pos = [x / G, y / G];
+          break outer;
+        }
+      }
+    }
+    if (pos === null) return null;
+    placed.set(item, pos);
+    mark([pos[0], pos[1], pos[0] + item.w, pos[1] + item.h]);
+  }
+  return placed;
+}
+
+function groupPackItems(faces: CollectedFace[]): Map<string, PackItem[]> {
+  const groups = new Map<string, PackItem[]>();
+  for (const cf of faces) {
+    const [w, h] = faceDims(cf.el, cf.facing);
+    const list = groups.get(cf.textureKey) ?? [];
+    list.push({ cf, w, h });
+    groups.set(cf.textureKey, list);
+  }
+  for (const items of groups.values()) {
+    items.sort(
+      (a, b) =>
+        b.h - a.h ||
+        b.w - a.w ||
+        a.cf.element.localeCompare(b.cf.element) ||
+        a.cf.facing.localeCompare(b.cf.facing),
+    );
+  }
+  return groups;
+}
+
+export interface AutoUvFitPlan {
+  fits: boolean;
+  width: number;
+  height: number;
+  /** Smallest sheet (doubling from current) on which a FULL repack of every face fits. */
+  neededWidth: number;
+  neededHeight: number;
+}
+
+/**
+ * Dry-run: would a full auto-UV repack of every enabled face fit the current sheet?
+ * Used to warn right when geometry outgrows the sheet (e.g. after a whole-model scale)
+ * instead of at the next autoUv call.
+ */
+export function planAutoUvFit(doc: ShapeDocument): AutoUvFitPlan {
+  const groups = groupPackItems(collectFaces(doc));
+  const [width, height] = texDims(doc);
+  const fitsAll = (w: number, h: number): boolean =>
+    [...groups.values()].every((items) => shelfPack(items, w, h) !== null);
+  if (fitsAll(width, height)) {
+    return { fits: true, width, height, neededWidth: width, neededHeight: height };
+  }
+  let w = width;
+  let h = height;
+  for (let i = 0; i < 24 && !fitsAll(w, h); i++) {
+    if (w <= h) w *= 2;
+    else h *= 2;
+  }
+  return { fits: false, width, height, neededWidth: w, neededHeight: h };
+}
+
+/**
+ * Auto-UV packing, one independent sheet per texture key (faces of different textures may
  * legitimately share UV space). Face dims are the exact shape-unit face sizes; existing
  * uv rotations are cleared (the packed rect assumes the unrotated corner mapping).
- * Disabled faces are skipped. Throws — naming the smallest sheet (doubling from the
- * current size) that fits — when the faces do not fit on textureWidth × textureHeight.
+ * Disabled faces are skipped.
  *
- * The element list is exact (no subtree recursion): pass every element you want packed.
- * Note that faces of elements OUTSIDE the list keep their rects, which may overlap the
- * fresh layout — run uvReport afterwards when packing a subset.
+ * Without an element list: FULL repack of every face (shelf packing); throws — naming the
+ * smallest doubled sheet that fits — when the sheet is too small.
+ *
+ * With an element list (exact names, no subtree recursion): INCREMENTAL — only the listed
+ * elements' faces are re-laid, placed into space not occupied by any other face's rect,
+ * so existing layouts (and hand-painted textures aligned to them) are preserved. Throws
+ * when no free space remains.
  */
 export function autoUv(doc: ShapeDocument, elements?: string[]): AutoUvResult {
   const op = 'autoUv';
@@ -398,24 +597,38 @@ export function autoUv(doc: ShapeDocument, elements?: string[]): AutoUvResult {
   }
 
   // One packing problem per texture key.
-  const groups = new Map<string, PackItem[]>();
-  for (const cf of all) {
-    const [w, h] = faceDims(cf.el, cf.facing);
-    const list = groups.get(cf.textureKey) ?? [];
-    list.push({ cf, w, h });
-    groups.set(cf.textureKey, list);
-  }
-  for (const items of groups.values()) {
-    items.sort(
-      (a, b) =>
-        b.h - a.h ||
-        b.w - a.w ||
-        a.cf.element.localeCompare(b.cf.element) ||
-        a.cf.facing.localeCompare(b.cf.facing),
-    );
-  }
-
+  const groups = groupPackItems(all);
   const [width, height] = texDims(doc);
+
+  if (filter !== null) {
+    // Incremental: place the selected faces into space not occupied by anything else.
+    const outside = collectFaces(doc).filter((cf) => !filter.has(cf.element));
+    const occupiedByKey = new Map<string, UvRect[]>();
+    for (const cf of outside) {
+      const list = occupiedByKey.get(cf.textureKey) ?? [];
+      list.push(cf.rect);
+      occupiedByKey.set(cf.textureKey, list);
+    }
+    const result: AutoUvResult = { faces: [] };
+    for (const [textureKey, items] of groups) {
+      const placed = freeSpacePack(items, occupiedByKey.get(textureKey) ?? [], width, height);
+      if (placed === null) {
+        throw new Error(
+          `${op}: no free space left on the ${width}x${height} sheet of '#${textureKey}' for the ` +
+            `selected faces — run a full repack (omit the elements list) or enlarge ` +
+            `textureWidth/textureHeight`,
+        );
+      }
+      for (const item of items) {
+        const [x, y] = placed.get(item)!;
+        const rect: UvRect = [x, y, x + item.w, y + item.h];
+        item.cf.face.uv = [vsnum(rect[0]), vsnum(rect[1]), vsnum(rect[2]), vsnum(rect[3])];
+        delete item.cf.face.rotation;
+        result.faces.push({ element: item.cf.element, face: item.cf.facing, textureKey, rect });
+      }
+    }
+    return result;
+  }
   const fitsAll = (w: number, h: number): boolean =>
     [...groups.values()].every((items) => shelfPack(items, w, h) !== null);
 

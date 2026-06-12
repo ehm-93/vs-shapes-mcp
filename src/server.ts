@@ -63,12 +63,13 @@ import {
   vec3 as vec3Of,
   type AnimationJson,
   type ElementJson,
+  type FaceName,
   type Finding,
   type JsonObject,
   type JsonValue,
   type Vec3,
 } from './vs/types.js';
-import { autoUv, setFaceUv, uvReport } from './vs/uv.js';
+import { autoUv, planAutoUvFit, setFaceProps, setFaceUv, uvReport } from './vs/uv.js';
 import { validateDocument } from './vs/validate.js';
 
 export interface BuildServerOpts {
@@ -455,14 +456,41 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
     content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
   });
 
+  /**
+   * Repeated findings of one code collapse into a single entry with a count (e.g. 78
+   * uv/out-of-bounds after an import, or anim/no-keyframes repeated while authoring) —
+   * mutate responses stay agent-sized; validate_run keeps the full list.
+   */
+  const groupFindings = (findings: Finding[]): (Finding & { count?: number })[] => {
+    const byCode = new Map<string, Finding[]>();
+    for (const f of findings) {
+      const list = byCode.get(f.code) ?? [];
+      list.push(f);
+      byCode.set(f.code, list);
+    }
+    const out: (Finding & { count?: number })[] = [];
+    for (const list of byCode.values()) {
+      if (list.length <= 2) out.push(...list);
+      else {
+        const first = list[0]!;
+        out.push({
+          ...first,
+          count: list.length,
+          message: `${first.message} (+${list.length - 1} more '${first.code}' findings — run validate_run for the full list)`,
+        });
+      }
+    }
+    return out;
+  };
+
   const validationSummary = (
     doc: ShapeDocument,
     level: 'fast' | 'full' = 'fast',
-  ): { errors: Finding[]; warnings: Finding[] } => {
+  ): { errors: (Finding & { count?: number })[]; warnings: (Finding & { count?: number })[] } => {
     const findings = validateDocument(doc, { level });
     return {
-      errors: findings.filter((f) => f.severity === 'error'),
-      warnings: findings.filter((f) => f.severity === 'warn'),
+      errors: groupFindings(findings.filter((f) => f.severity === 'error')),
+      warnings: groupFindings(findings.filter((f) => f.severity === 'warn')),
     };
   };
 
@@ -1062,9 +1090,12 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
         rotationX: z.number().nullable().optional().describe('Rotation about X in degrees; null removes the field (= 0).'),
         rotationY: z.number().nullable().optional().describe('Rotation about Y in degrees; null removes the field (= 0).'),
         rotationZ: z.number().nullable().optional().describe('Rotation about Z in degrees; null removes the field (= 0).'),
+        scaleX: z.number().nullable().optional().describe('Render-time element scale about rotationOrigin (> 0, inherits down the subtree); null removes the field (= 1). Geometry/UVs untouched.'),
+        scaleY: z.number().nullable().optional().describe('Render-time element scale about rotationOrigin; null removes the field (= 1).'),
+        scaleZ: z.number().nullable().optional().describe('Render-time element scale about rotationOrigin; null removes the field (= 1).'),
       },
     },
-    guard(({ docId, name, from, to, rotationOrigin, rotationX, rotationY, rotationZ }) =>
+    guard(({ docId, name, from, to, rotationOrigin, rotationX, rotationY, rotationZ, scaleX, scaleY, scaleZ }) =>
       mutate(docId, `element_edit '${name}'`, (m) => {
         editElement(m.doc, name, {
           ...(from !== undefined ? { from: from as Vec3 } : {}),
@@ -1075,6 +1106,9 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
           ...(rotationX !== undefined ? { rotationX } : {}),
           ...(rotationY !== undefined ? { rotationY } : {}),
           ...(rotationZ !== undefined ? { rotationZ } : {}),
+          ...(scaleX !== undefined ? { scaleX } : {}),
+          ...(scaleY !== undefined ? { scaleY } : {}),
+          ...(scaleZ !== undefined ? { scaleZ } : {}),
         });
         return { edited: name };
       }),
@@ -1191,7 +1225,22 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       mutate(docId, `element_scale ${name === null ? '(whole model)' : `'${name}'`}`, (m) => {
         const a = (anchor ?? [0, 0, 0]) as Vec3;
         scaleElement(m.doc, name, factor as number | Vec3, a);
-        return { scaled: name ?? '(whole model)', factor, anchor: a };
+        // Geometry grew but UVs didn't change: warn NOW if a future auto-UV repack no
+        // longer fits the sheet, instead of letting the next uv_auto call fail cold.
+        const fit = planAutoUvFit(m.doc);
+        return {
+          scaled: name ?? '(whole model)',
+          factor,
+          anchor: a,
+          ...(fit.fits
+            ? {}
+            : {
+                warning:
+                  `the scaled faces no longer fit the ${fit.width}x${fit.height} sheet for a full ` +
+                  `auto-UV repack — set textureWidth/textureHeight to ${fit.neededWidth}x${fit.neededHeight} ` +
+                  `(doc_patch_json) before the next uv_auto, and rebake textures at the new size`,
+              }),
+        };
       }),
     ),
   );
@@ -1345,9 +1394,17 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
           .string()
           .optional()
           .describe("Behavior when the triggering activity stops (default 'EaseOut'; engine default is 'Rewind')."),
+        anchorElements: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'Elements to seed with zero rotation+offset keys at frame 0 — the neutral-pose ' +
+              'anchor every Stop/Hold animation needs so frames before the first real key ' +
+              "don't wrap-lerp from the last one.",
+          ),
       },
     },
-    guard(({ docId, code, name, quantityFrames, onAnimationEnd, onActivityStopped }) =>
+    guard(({ docId, code, name, quantityFrames, onAnimationEnd, onActivityStopped, anchorElements }) =>
       mutate(docId, `anim_create '${code}'`, (m) => {
         createAnimation(m.doc, {
           code,
@@ -1356,7 +1413,16 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
           ...(onAnimationEnd !== undefined ? { onAnimationEnd } : {}),
           ...(onActivityStopped !== undefined ? { onActivityStopped } : {}),
         });
-        return { created: code, quantityFrames };
+        for (const el of anchorElements ?? []) {
+          setKeyframe(m.doc, code, 0, el, { rotation: [0, 0, 0], offset: [0, 0, 0] });
+        }
+        return {
+          created: code,
+          quantityFrames,
+          ...(anchorElements !== undefined && anchorElements.length > 0
+            ? { anchoredAtFrame0: anchorElements }
+            : {}),
+        };
       }),
     ),
   );
@@ -1458,14 +1524,29 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
         stretch: vec3Param('Scale factors [x, y, z] (neutral 1); null clears the stretch channel.')
           .nullable()
           .optional(),
+        rotShortestDistance: z
+          .object({
+            x: z.boolean().optional(),
+            y: z.boolean().optional(),
+            z: z.boolean().optional(),
+          })
+          .nullable()
+          .optional()
+          .describe(
+            'Per-axis shortest-angular-path flags for the rotation lerp out of this keyframe ' +
+              '(continuous rotators like gears need them at the cycle wrap). Given axes are ' +
+              'set/removed; null removes all three. Only meaningful when the entry also has a ' +
+              'rotation channel.',
+          ),
       },
     },
-    guard(({ docId, code, frame, element, offset, rotation, stretch }) =>
+    guard(({ docId, code, frame, element, offset, rotation, stretch, rotShortestDistance }) =>
       mutate(docId, `anim_set_keyframe '${code}' f${frame} '${element}'`, (m) => {
         const entry = setKeyframe(m.doc, code, frame, element, {
           ...(offset !== undefined ? { offset: offset as Vec3 | null } : {}),
           ...(rotation !== undefined ? { rotation: rotation as Vec3 | null } : {}),
           ...(stretch !== undefined ? { stretch: stretch as Vec3 | null } : {}),
+          ...(rotShortestDistance !== undefined ? { rotShortestDistance } : {}),
         });
         return {
           animation: code,
@@ -1572,20 +1653,32 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
     {
       description:
         'Gait-cycle helper: copy the first half-cycle onto the second half with element pairs ' +
-        "swapped (e.g. [['L leg', 'R leg']]) — on a left/right-symmetric rig the contralateral " +
-        'pose IS the swapped pose, so no sign flips are applied. Requires an even quantityFrames.',
+        "swapped (e.g. [['L leg', 'R leg']]). Copied entries are mirror-conjugated across the " +
+        "sagittal plane (default axis 'z', matching element_mirror): rotationX/rotationY and " +
+        'offsetZ negate while rotationZ holds — correct for any keyed channel on a symmetric ' +
+        'rig, including unpaired elements like tails and heads, whose sways alternate. ' +
+        "Pass axis 'none' for a verbatim copy. Requires an even quantityFrames.",
       inputSchema: {
         docId: docIdParam,
         code: z.string().describe('Animation code (must have an even quantityFrames).'),
         pairs: z
           .array(z.tuple([z.string(), z.string()]))
           .describe("Contralateral element pairs, e.g. [['FL leg', 'FR leg'], ['BL leg', 'BR leg']]."),
+        axis: z
+          .enum(['x', 'z', 'none'])
+          .optional()
+          .describe(
+            "Sagittal mirror axis for conjugating copied entries (default 'z' — VS creatures are " +
+              "z-symmetric). 'none' copies values verbatim (legacy).",
+          ),
       },
     },
-    guard(({ docId, code, pairs }) =>
+    guard(({ docId, code, pairs, axis }) =>
       mutate(docId, `anim_mirror_phase '${code}'`, (m) => {
-        const result = mirrorPhase(m.doc, code, pairs as [string, string][]);
-        return { animation: code, ...result };
+        const result = mirrorPhase(m.doc, code, pairs as [string, string][], {
+          ...(axis !== undefined ? { axis } : {}),
+        });
+        return { animation: code, axis: axis ?? 'z', ...result };
       }),
     ),
   );
@@ -1670,24 +1763,101 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
   );
 
   server.registerTool(
+    'face_set',
+    {
+      description:
+        'Edit properties of EXISTING faces — texture key, glow, enabled — across one or more ' +
+        'elements (optionally whole subtrees) without touching UV rects. The bulk way to ' +
+        're-texture a body region (legs to a darker key, eyes to glow) that previously needed ' +
+        'doc_patch_json index paths. Faces are not created here (use uv_set_face or element_add).',
+      inputSchema: {
+        docId: docIdParam,
+        elements: z
+          .array(z.string())
+          .min(1)
+          .describe('Element names to edit (case-sensitive).'),
+        subtree: z
+          .boolean()
+          .optional()
+          .describe('true: also edit every descendant of the listed elements (default false).'),
+        faces: z
+          .array(z.enum(FACE_VALUES))
+          .optional()
+          .describe('Face filter (default: all six).'),
+        texture: z
+          .string()
+          .optional()
+          .describe("New texture key ('skin' or '#skin'); dangling keys are flagged by validation, not blocked."),
+        glow: z
+          .number()
+          .nullable()
+          .optional()
+          .describe('Glow 0–255 (brightness floor, e.g. 255 for eyes); null or 0 removes the field.'),
+        enabled: z
+          .boolean()
+          .nullable()
+          .optional()
+          .describe('false disables the face (engine drops it at load); true or null restores the default.'),
+      },
+    },
+    guard(({ docId, elements, subtree, faces, texture, glow, enabled }) =>
+      mutate(docId, `face_set [${(elements as string[]).join(', ')}]`, (m) => {
+        const result = setFaceProps(
+          m.doc,
+          elements as string[],
+          {
+            ...(texture !== undefined ? { texture } : {}),
+            ...(glow !== undefined ? { glow } : {}),
+            ...(enabled !== undefined ? { enabled } : {}),
+          },
+          {
+            ...(faces !== undefined ? { faces: faces as FaceName[] } : {}),
+            ...(subtree !== undefined ? { subtree } : {}),
+          },
+        );
+        return { ...result };
+      }),
+    ),
+  );
+
+  server.registerTool(
     'uv_auto',
     {
       description:
-        'Re-pack face UVs with a shelf packer (one sheet per texture key, exact face sizes, ' +
-        'rotations cleared). Fails — naming the smallest sheet that would fit — when the faces ' +
-        'do not fit on textureWidth × textureHeight.',
+        'Auto-UV packing (one sheet per texture key, exact face sizes, rotations cleared). ' +
+        'Without elements: FULL repack of every face. With elements: INCREMENTAL — only those ' +
+        "faces are re-laid, into space no other face occupies, preserving existing layouts (and " +
+        'textures painted against them). Fails — naming the smallest sheet that would fit — ' +
+        'when out of space. Returns a per-texture summary; pass detail: true for every rect.',
       inputSchema: {
         docId: docIdParam,
         elements: z
           .array(z.string())
           .optional()
-          .describe('Exact element list to pack (no subtree recursion). Omit to pack every element.'),
+          .describe('Exact element list to pack incrementally (no subtree recursion). Omit for a full repack.'),
+        detail: z
+          .boolean()
+          .optional()
+          .describe('true: include every packed face rect (large on big rigs); default is a per-texture summary.'),
       },
     },
-    guard(({ docId, elements }) =>
+    guard(({ docId, elements, detail }) =>
       mutate(docId, 'uv_auto', (m) => {
         const result = autoUv(m.doc, elements);
-        return { packed: result.faces.length, faces: result.faces };
+        if (detail === true) return { packed: result.faces.length, faces: result.faces };
+        const perTexture: Record<string, { faces: number; maxU: number; maxV: number }> = {};
+        for (const f of result.faces) {
+          const t = (perTexture[f.textureKey] ??= { faces: 0, maxU: 0, maxV: 0 });
+          t.faces++;
+          t.maxU = Math.max(t.maxU, f.rect[2]);
+          t.maxV = Math.max(t.maxV, f.rect[3]);
+        }
+        return {
+          packed: result.faces.length,
+          mode: elements === undefined ? 'full repack' : 'incremental (existing rects preserved)',
+          perTexture,
+          note: 'pass detail: true for every packed rect',
+        };
       }),
     ),
   );
@@ -1696,7 +1866,12 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
   // Render
   // =====================================================================================
 
-  const renderResultContent = (png: Buffer, caption: string, missing: string[]): CallToolResult => {
+  const renderResultContent = (
+    png: Buffer,
+    caption: string,
+    missing: string[],
+    savePath?: string,
+  ): CallToolResult => {
     let text = caption;
     if (missing.length > 0) {
       text +=
@@ -1706,6 +1881,14 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
           ? `Check the shape's textures map paths (corpus_describe shows them), or pass texturesRoot for mod assets.`
           : `No Vintage Story install was found: start the server with --game-path <install dir> to resolve vanilla textures.`);
     }
+    if (savePath !== undefined) {
+      // Export mode: the file is the artifact — skip the inline image to keep the
+      // response small (open the PNG to inspect it).
+      const abs = resolve(savePath);
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, png);
+      return { content: [{ type: 'text', text: `Saved render to ${abs} (${png.length} bytes)\n${text}` }] };
+    }
     return {
       content: [
         { type: 'image', data: png.toString('base64'), mimeType: 'image/png' },
@@ -1713,6 +1896,14 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       ],
     };
   };
+
+  const savePathParam = z
+    .string()
+    .optional()
+    .describe(
+      'Write the PNG to this file path instead of returning it inline (reference-render ' +
+        'export; parent directories are created).',
+    );
 
   server.registerTool(
     'render_views',
@@ -1749,9 +1940,10 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
           .string()
           .optional()
           .describe('Extra directory to resolve texture PNGs (mod assets); game assets always fall back.'),
+        savePath: savePathParam,
       },
     },
-    guard(async ({ docId, views, anim, frame, size, overlayHitbox, texturesRoot }) => {
+    guard(async ({ docId, views, anim, frame, size, overlayHitbox, texturesRoot, savePath }) => {
       const m = session.get(docId);
       const result = await renderViews(m.doc, {
         ...(views !== undefined ? { views: views as ViewName[] } : {}),
@@ -1762,7 +1954,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
         ...(texturesRoot !== undefined ? { texturesRoot } : {}),
         renderer,
       });
-      return renderResultContent(result.png, result.caption, result.missingTextures);
+      return renderResultContent(result.png, result.caption, result.missingTextures, savePath);
     }),
   );
 
@@ -1790,9 +1982,10 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
           .string()
           .optional()
           .describe('Extra directory to resolve texture PNGs (mod assets); game assets always fall back.'),
+        savePath: savePathParam,
       },
     },
-    guard(async ({ docId, anim, frames, view, size, texturesRoot }) => {
+    guard(async ({ docId, anim, frames, view, size, texturesRoot, savePath }) => {
       const m = session.get(docId);
       const result = await renderFilmstrip(m.doc, {
         anim,
@@ -1802,7 +1995,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
         ...(texturesRoot !== undefined ? { texturesRoot } : {}),
         renderer,
       });
-      return renderResultContent(result.png, result.caption, result.missingTextures);
+      return renderResultContent(result.png, result.caption, result.missingTextures, savePath);
     }),
   );
 

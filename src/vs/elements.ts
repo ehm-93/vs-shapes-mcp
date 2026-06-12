@@ -347,6 +347,14 @@ export interface ElementPatch {
   rotationX?: number | null;
   rotationY?: number | null;
   rotationZ?: number | null;
+  /**
+   * Render-time element scale about rotationOrigin (engine default 1); inherits down the
+   * subtree per the engine's local-matrix composition. null removes the field. Box
+   * geometry and UVs are untouched — for geometry scaling use scaleElement.
+   */
+  scaleX?: number | null;
+  scaleY?: number | null;
+  scaleZ?: number | null;
 }
 
 export function editElement(doc: ShapeDocument, name: string, patch: ElementPatch): ElementJson {
@@ -361,13 +369,22 @@ export function editElement(doc: ShapeDocument, name: string, patch: ElementPatc
       throw new Error(`${op}('${name}'): ${key} must be a finite number (degrees) or null to clear, got ${v}`);
     }
   }
+  for (const key of ['scaleX', 'scaleY', 'scaleZ'] as const) {
+    const v = patch[key];
+    if (v !== undefined && v !== null && (!Number.isFinite(v) || v <= 0)) {
+      throw new Error(
+        `${op}('${name}'): ${key} must be a finite number > 0 (use element_mirror for reflections) ` +
+          `or null to clear, got ${v}`,
+      );
+    }
+  }
   if (patch.from !== undefined) el.from = vec3ToJson(patch.from);
   if (patch.to !== undefined) el.to = vec3ToJson(patch.to);
   if (patch.rotationOrigin !== undefined) {
     if (patch.rotationOrigin === null) delete el.rotationOrigin;
     else el.rotationOrigin = vec3ToJson(patch.rotationOrigin);
   }
-  for (const key of ['rotationX', 'rotationY', 'rotationZ'] as const) {
+  for (const key of ['rotationX', 'rotationY', 'rotationZ', 'scaleX', 'scaleY', 'scaleZ'] as const) {
     const v = patch[key];
     if (v === undefined) continue;
     if (v === null) delete el[key];

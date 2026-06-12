@@ -10,6 +10,7 @@
  * | shape/inverted-box       | error     | fast  | from > to on some axis (box is inside-out)          |
  * | shape/zero-thickness     | note      | fast  | from == to on some axis (legal, vanilla uses it)    |
  * | shape/dup-name           | error     | fast  | duplicate element names (animations key on names)   |
+ * | shape/detached-child     | note      | fast  | child box fully disjoint from its parent's box      |
  * | shape/key-casing         | error     | fast  | known key in non-canonical casing (tool misreads it)|
  * | shape/face-key           | error     | fast  | non-canonical face dict key (engine first-letter)   |
  * | shape/step-parent        | note      | fast  | root elements carry stepParentName (attach-time)    |
@@ -200,6 +201,8 @@ function nearestName(target: string, names: Iterable<string>): string | undefine
 
 interface ElementEntry {
   el: ElementJson;
+  /** The parent element, or null at root level. */
+  parent: ElementJson | null;
   /** Name of the parent element, or null at root level. */
   parentName: string | null;
 }
@@ -212,7 +215,7 @@ interface ElementEntry {
 function collectElements(root: ShapeJson): ElementEntry[] {
   const out: ElementEntry[] = [];
   const seen = new Set<ElementJson>();
-  const visit = (els: unknown, parentName: string | null): void => {
+  const visit = (els: unknown, parent: ElementJson | null): void => {
     if (!Array.isArray(els)) return;
     for (const raw of els) {
       if (raw === null || typeof raw !== 'object' || Array.isArray(raw) || raw instanceof VsNum) {
@@ -221,8 +224,12 @@ function collectElements(root: ShapeJson): ElementEntry[] {
       const el = raw as ElementJson;
       if (seen.has(el)) continue;
       seen.add(el);
-      out.push({ el, parentName });
-      visit(el.children, typeof el.name === 'string' ? el.name : null);
+      out.push({
+        el,
+        parent,
+        parentName: parent !== null && typeof parent.name === 'string' ? parent.name : null,
+      });
+      visit(el.children, el);
     }
   };
   visit(root.elements, null);
@@ -359,6 +366,59 @@ function checkBoxes(entries: ElementEntry[], findings: Finding[]): void {
           `the two faces on that axis are coplanar and visible from both sides.`,
       });
     }
+  }
+}
+
+/**
+ * shape/detached-child (note): a child's box, in parent-local coordinates (relative to
+ * the parent's FROM corner), is fully disjoint from the parent's own box. Children are
+ * authored relative to the from corner, so a sign slip leaves the part floating far from
+ * the body (the floating-arms class of bug). Touching at a face (surface decor, growths)
+ * does not fire. Note severity: rotations and animation can make a disjoint box
+ * legitimately appear attached.
+ */
+function checkDetachedChildren(entries: ElementEntry[], findings: Finding[]): void {
+  const validBox = (el: ElementJson): boolean =>
+    Array.isArray(el.from) &&
+    el.from.length === 3 &&
+    Array.isArray(el.to) &&
+    el.to.length === 3 &&
+    [...el.from, ...el.to].every((v) => v instanceof VsNum && Number.isFinite(v.value));
+  for (const { el, parent } of entries) {
+    if (parent === null) continue;
+    if (!validBox(el) || !validBox(parent)) continue; // malformed boxes reported elsewhere
+    // Pure transform/group parents (no faces, or zero-size pivots — vanilla's ORIGIN-*
+    // pattern) place children freely by design: containment is not expected there.
+    const parentFaces = parent.faces;
+    const facesCount = parentFaces !== null && typeof parentFaces === 'object' ? Object.keys(parentFaces).length : 0;
+    if (facesCount === 0) continue;
+    const psizes = [0, 1, 2].map((i) => Math.abs(parent.to[i]!.value - parent.from[i]!.value));
+    if (psizes.every((s) => s === 0)) continue;
+    const name = typeof el.name === 'string' ? el.name : '(unnamed)';
+    const parentName = typeof parent.name === 'string' ? parent.name : '(unnamed)';
+    const gaps: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const psize = psizes[i]!;
+      // Small offsets are routine modeling (overhangs, mandibles a hair forward); only a
+      // SUBSTANTIAL gap suggests the floating-part coordinate slip this lint exists for.
+      const threshold = Math.max(2, 0.3 * psize);
+      const lo = Math.min(el.from[i]!.value, el.to[i]!.value);
+      const hi = Math.max(el.from[i]!.value, el.to[i]!.value);
+      if (-hi > threshold) gaps.push(`${AXIS_NAMES[i]} gap ${fmt(-hi)}`);
+      else if (lo - psize > threshold) gaps.push(`${AXIS_NAMES[i]} gap ${fmt(lo - psize)}`);
+    }
+    if (gaps.length === 0) continue;
+    findings.push({
+      severity: 'note',
+      code: 'shape/detached-child',
+      element: name,
+      message:
+        `Child '${name}' does not touch its parent '${parentName}' (${gaps.join(', ')} in ` +
+        `1/16-block units). Child coordinates are relative to the parent's FROM corner — ` +
+        `if this is unintended, re-anchor the box (a rotated or animated part can still ` +
+        `look attached despite this note).`,
+      fix: `Shift '${name}' so its box overlaps the parent's [0..size] local box, or ignore if the detachment is intentional.`,
+    });
   }
 }
 
@@ -1252,6 +1312,7 @@ export function validateDocument(doc: ShapeDocLike, opts: ValidateOptions = {}):
 
   checkTreeShape(root, findings);
   checkBoxes(entries, findings);
+  checkDetachedChildren(entries, findings);
   checkDuplicateNames(entries, findings);
   checkKeyCasing(root, entries, findings);
   checkStepParent(root, findings);

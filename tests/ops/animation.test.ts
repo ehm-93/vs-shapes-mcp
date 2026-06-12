@@ -315,7 +315,7 @@ describe('mirrorPhase — synthetic 4-leg walk', () => {
     ],
   });
 
-  it('copies the first half onto the second half with each pair swapped, unpaired as-is', () => {
+  it('copies the first half swapped and z-conjugated (default): rotX/rotY/offsetZ flip, rotZ holds', () => {
     const doc = docOf(walkShape());
     const result = mirrorPhase(doc, 'walk8', [
       ['FL', 'FR'],
@@ -326,22 +326,50 @@ describe('mirrorPhase — synthetic 4-leg walk', () => {
     expect(anim.keyframes.map((kf) => kf.frame.value)).toEqual([0, 2, 4, 6]);
     const kf0 = anim.keyframes[0]!.elements;
     const kf4 = anim.keyframes.find((kf) => kf.frame.value === 4)!.elements;
-    // a's values land on b and vice versa — no sign flips.
-    expect(kf4['FR']!.rotationX!.value).toBe(30);
-    expect(kf4['FR']!.offsetY!.value).toBe(1); // the whole entry travels (offset included)
-    expect(kf4['FL']!.rotationX!.value).toBe(-30);
+    // a's entry lands on b mirror-conjugated across the z plane: rotationX negates.
+    expect(kf4['FR']!.rotationX!.value).toBe(-30);
+    expect(kf4['FR']!.offsetY!.value).toBe(1); // offsetX/offsetY unchanged by a z-mirror
+    expect(kf4['FL']!.rotationX!.value).toBe(30);
     expect(kf4['FL']!.offsetY).toBeUndefined();
-    expect(kf4['BR']!.rotationX!.value).toBe(-25);
-    expect(kf4['BL']!.rotationX!.value).toBe(25);
-    // Unpaired element copied as-is.
-    expect(kf4['tail']!.rotationX!.value).toBe(5);
+    expect(kf4['BR']!.rotationX!.value).toBe(25);
+    expect(kf4['BL']!.rotationX!.value).toBe(-25);
+    // Unpaired element conjugated too — exactly what an alternating tail sway wants.
+    expect(kf4['tail']!.rotationX!.value).toBe(-5);
     // Deep copies: the target entry is not the same object as the source entry.
     expect(kf4['FR']).not.toBe(kf0['FL']);
-    // The half-cycle then loops cleanly through the engine port: pose(0) == pose(8 → 0).
+    // The half-cycle then loops cleanly through the engine port.
     const p0 = interpolatePose(anim, 0).get('FL')!;
     const p4 = interpolatePose(anim, 4).get('FL')!;
     expect(p0.degX).toBe(30);
-    expect(p4.degX).toBe(-30);
+    expect(p4.degX).toBe(30); // FL receives FR's f0 pose (-30) conjugated → +30
+  });
+
+  it('conjugates rotY/offsetZ for z, keeps rotZ; axis x flips rotY/rotZ/offsetX', () => {
+    const mk = (): ReturnType<typeof docOf> => {
+      const doc = docOf(walkShape());
+      setKeyframe(doc, 'walk8', 0, 'tail', {
+        rotation: [5, 7, 11],
+        offset: [1, 2, 3],
+      });
+      return doc;
+    };
+    const z = mk();
+    mirrorPhase(z, 'walk8', [['FL', 'FR']]);
+    const zTail = z.getAnimation('walk8')!.keyframes.find((kf) => kf.frame.value === 4)!.elements['tail']!;
+    expect([zTail.rotationX!.value, zTail.rotationY!.value, zTail.rotationZ!.value]).toEqual([-5, -7, 11]);
+    expect([zTail.offsetX!.value, zTail.offsetY!.value, zTail.offsetZ!.value]).toEqual([1, 2, -3]);
+
+    const x = mk();
+    mirrorPhase(x, 'walk8', [['FL', 'FR']], { axis: 'x' });
+    const xTail = x.getAnimation('walk8')!.keyframes.find((kf) => kf.frame.value === 4)!.elements['tail']!;
+    expect([xTail.rotationX!.value, xTail.rotationY!.value, xTail.rotationZ!.value]).toEqual([5, -7, -11]);
+    expect([xTail.offsetX!.value, xTail.offsetY!.value, xTail.offsetZ!.value]).toEqual([-1, 2, 3]);
+
+    const none = mk();
+    mirrorPhase(none, 'walk8', [['FL', 'FR']], { axis: 'none' });
+    const nTail = none.getAnimation('walk8')!.keyframes.find((kf) => kf.frame.value === 4)!.elements['tail']!;
+    expect([nTail.rotationX!.value, nTail.rotationY!.value, nTail.rotationZ!.value]).toEqual([5, 7, 11]);
+    expect([nTail.offsetX!.value, nTail.offsetY!.value, nTail.offsetZ!.value]).toEqual([1, 2, 3]);
   });
 
   it('replaces existing keyframes in the second half', () => {
@@ -349,7 +377,7 @@ describe('mirrorPhase — synthetic 4-leg walk', () => {
     setKeyframe(doc, 'walk8', 4, 'tail', { rotation: [99, 0, 0] });
     mirrorPhase(doc, 'walk8', [['FL', 'FR']]);
     const kf4 = doc.getAnimation('walk8')!.keyframes.find((kf) => kf.frame.value === 4)!;
-    expect(kf4.elements['tail']!.rotationX!.value).toBe(5); // overwritten by the mirror
+    expect(kf4.elements['tail']!.rotationX!.value).toBe(-5); // overwritten by the conjugated mirror
   });
 
   it('requires an even quantityframes and well-formed pairs', () => {

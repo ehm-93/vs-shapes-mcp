@@ -62,8 +62,8 @@ corpus tools error clearly and renders fall back to deterministic flat colors.
 | Query | `shape_describe`, `shape_measure`, `shape_find` |
 | Geometry | `element_add`, `element_edit`, `element_rename` (cascades into keyframes), `element_reparent`, `element_mirror`, `element_scale`, `element_delete`, `element_duplicate`, `element_import` |
 | Animation | `anim_list`, `anim_describe`, `anim_create`, `anim_delete`, `anim_edit_meta`, `anim_set_keyframe`, `anim_delete_keyframe`, `anim_adjust`, `anim_retime`, `anim_mirror_phase` |
-| UV | `uv_report`, `uv_set_face`, `uv_auto` |
-| Perception | `render_views`, `render_filmstrip` |
+| UV / faces | `uv_report`, `uv_set_face`, `uv_auto` (incremental with `elements`), `face_set` (bulk texture/glow/enabled) |
+| Perception | `render_views`, `render_filmstrip` (both export to disk via `savePath`) |
 | Validation | `validate_run` (also runs after every mutation) |
 | Corpus | `corpus_search`, `corpus_describe` |
 | Escape hatch | `doc_get_json`, `doc_patch_json` (RFC 6902, transactional, fully validated) |
@@ -79,6 +79,13 @@ npm test            # full suite incl. corpus round-trip + GPU/software parity (
 npm run typecheck
 npm run dev         # tsx src/index.ts
 ```
+
+Notes:
+
+- A connected MCP session runs the `dist/` it was launched with — after changing `src/`,
+  `npm run build` and restart the session (or client) to pick the changes up.
+- Library consumers of `render/views.js` should `process.exit()` when done (or avoid the
+  GPU backend with `renderer: 'software'`): the Dawn device keeps the event loop alive.
 
 Architecture and module contracts: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Engine semantics with decompile citations: [docs/GROUND-TRUTH.md](docs/GROUND-TRUTH.md),
