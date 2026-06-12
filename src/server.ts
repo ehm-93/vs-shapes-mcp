@@ -145,6 +145,67 @@ const faceSpecSchema = z.object({
   enabled: z.boolean().optional().describe('false disables the face (the engine drops it at load).'),
 });
 
+/** Uniform shorthand: `{ all: {...} }` applies one spec to all six faces with auto UVs. */
+const uniformFaceSpecSchema = z.object({
+  texture: z
+    .string()
+    .optional()
+    .describe("Texture key ('skin' or '#skin') for every face; defaults to the first key."),
+  rotation: z.number().optional().describe('UV rotation 0/90/180/270 on every face.'),
+  glow: z.number().optional().describe('Glow 0–255 on every face (omitted when 0).'),
+  enabled: z.boolean().optional().describe('false disables every face.'),
+});
+
+/** Element-name glob → anchored case-insensitive RegExp ('*' = any run, '?' = one char). */
+function elementGlobToRegExp(glob: string): RegExp {
+  return new RegExp(
+    `^${glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*').replaceAll('?', '.')}$`,
+    'i',
+  );
+}
+
+/** A selector is a glob (not a literal element name) when it contains '*' or '?'. */
+const isElementGlob = (s: string): boolean => s.includes('*') || s.includes('?');
+
+/**
+ * Expand element selectors to concrete element names: selectors containing glob chars
+ * ('*'/'?') match element names case-insensitively (the shape_find dialect); literal names
+ * pass through unchanged (their existence is validated downstream by the op). Order is
+ * preserved and names deduped, so overlapping globs/names set each face once. Throws —
+ * naming the glob — when a glob matches no element, so a typo'd pattern is not a silent no-op.
+ */
+function resolveElementSelectors(doc: ShapeDocument, selectors: string[], op: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (name: string): void => {
+    if (!seen.has(name)) {
+      seen.add(name);
+      out.push(name);
+    }
+  };
+  for (const sel of selectors) {
+    if (!isElementGlob(sel)) {
+      add(sel);
+      continue;
+    }
+    const re = elementGlobToRegExp(sel);
+    let matched = 0;
+    doc.walk((el) => {
+      if (re.test(el.name)) {
+        matched++;
+        add(el.name);
+      }
+    });
+    if (matched === 0) {
+      throw new Error(
+        `${op}: glob '${sel}' matched no elements (case-insensitive; '*' = any run, ` +
+          `'?' = one char). Use shape_find to preview which names a glob hits.`,
+      );
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // buildServer
 // ---------------------------------------------------------------------------
@@ -729,10 +790,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
     },
     guard(({ docId, glob }) => {
       const m = session.get(docId);
-      const re = new RegExp(
-        `^${glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*').replaceAll('?', '.')}$`,
-        'i',
-      );
+      const re = elementGlobToRegExp(glob);
       const matches: { name: string; parent: string | null; path: string }[] = [];
       m.doc.walk((el, path) => {
         if (re.test(el.name)) {
@@ -782,12 +840,15 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
           .union([
             z.literal('auto-uv'),
             z.literal('none'),
+            z.object({ all: uniformFaceSpecSchema }),
             z.record(z.enum(FACE_VALUES), faceSpecSchema),
           ])
           .optional()
           .describe(
             "'auto-uv' (default): six faces, UV [0, 0, faceW, faceH]; 'none': no faces (pivot/group " +
-              'element); or an explicit per-face map (faces named for the side they show: north = −Z).',
+              "element); { all: {...} }: auto UVs with one texture/glow/rotation/enabled on all six " +
+              'faces (uniform shorthand); or an explicit per-face map (faces named for the side they ' +
+              'show: north = −Z).',
           ),
       },
     },
@@ -1504,13 +1565,19 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
         'Edit properties of EXISTING faces — texture key, glow, enabled — across one or more ' +
         'elements (optionally whole subtrees) without touching UV rects. The bulk way to ' +
         're-texture a body region (legs to a darker key, eyes to glow) that previously needed ' +
-        'doc_patch_json index paths. Faces are not created here (use uv_set_face or element_add).',
+        'doc_patch_json index paths: an entry may be a literal element name OR a name glob ' +
+        "(e.g. '*leg*'), so 'set glow on every matching element' is one call. Faces are not " +
+        'created here (use uv_set_face or element_add).',
       inputSchema: {
         docId: docIdParam,
         elements: z
           .array(z.string())
           .min(1)
-          .describe('Element names to edit (case-sensitive).'),
+          .describe(
+            "Element selectors: literal names (case-sensitive) or name globs ('*' = any run, " +
+              "'?' = one char, case-insensitive — e.g. '*Leg*'). A glob matching no element is an " +
+              'error; matches are deduped. Use shape_find to preview a glob.',
+          ),
         subtree: z
           .boolean()
           .optional()
@@ -1537,9 +1604,10 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
     },
     guard(({ docId, elements, subtree, faces, texture, glow, enabled }) =>
       mutate(docId, `face_set [${(elements as string[]).join(', ')}]`, (m) => {
+        const targets = resolveElementSelectors(m.doc, elements as string[], 'face_set');
         const result = setFaceProps(
           m.doc,
-          elements as string[],
+          targets,
           {
             ...(texture !== undefined ? { texture } : {}),
             ...(glow !== undefined ? { glow } : {}),

@@ -76,6 +76,32 @@ describe('face_set', () => {
       await client.close();
     }
   });
+
+  it('selects elements by name glob, setting a field across every match in one call', async () => {
+    const { client, call } = await connect();
+    try {
+      const docId = await rigDoc(call);
+      // two more legs so a glob spans several elements (rigDoc already has 'leg')
+      payload(await call('element_add', { docId, parent: 'body', name: 'legFrontLeft', from: [0, -4, 0], to: [1, 0, 1] }));
+      payload(await call('element_add', { docId, parent: 'body', name: 'legFrontRight', from: [2, -4, 0], to: [3, 0, 1] }));
+
+      // 'leg*' is case-insensitive and matches leg, legFrontLeft, legFrontRight — not body.
+      const result = payload(await call('face_set', { docId, elements: ['leg*'], faces: ['north'], glow: 255 }));
+      expect(result['facesUpdated']).toBe(3);
+      expect(Object.keys(result['updated'] as object).sort()).toEqual([
+        'leg',
+        'legFrontLeft',
+        'legFrontRight',
+      ]);
+
+      // A glob matching nothing is an error naming the glob (not a silent no-op).
+      const miss = await call('face_set', { docId, elements: ['zzz*'], glow: 10 });
+      expect(miss.isError).toBe(true);
+      expect(miss.content.find((c) => c.type === 'text')?.text).toMatch(/glob 'zzz\*' matched no elements/);
+    } finally {
+      await client.close();
+    }
+  });
 });
 
 describe('render savePath export', () => {

@@ -181,6 +181,28 @@ describe('missing-texture fallback', () => {
     expect(set.missing).toEqual(['ghost']);
     expect(set.textures[set.idFor('ghost')]!.width).toBe(1);
   });
+
+  it('ignores keys referenced only by enabled:false faces (vanilla #null is not "missing")', () => {
+    // hawk.json and friends keep '#null' refs on disabled faces; the engine drops those
+    // faces at load, so their dead texture key must not be reported as a missing texture.
+    const doc = makeDoc({
+      elements: [
+        {
+          name: 'e',
+          from: [0, 0, 0],
+          to: [16, 16, 16],
+          faces: {
+            north: { texture: '#alpha', uv: [0, 0, 4, 4] },
+            south: { texture: '#null', uv: [0, 0, 4, 4], enabled: false },
+          },
+        },
+      ],
+      textures: { alpha: 'no/such/a' },
+    });
+    const set = createTextureSet(doc, []);
+    expect(set.missing).toEqual(['alpha']); // 'null' is not collected, not reported
+    expect(() => set.idFor('null')).toThrow(/'null'/); // never entered the table
+  });
 });
 
 describe('sampleNearest', () => {

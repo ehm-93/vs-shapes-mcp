@@ -277,4 +277,18 @@ describe('resolveTexturePng', () => {
     expect(corpus.resolveTexturePng('survival:gametex/foo')).toBeNull(); // wrong domain
     expect(corpus.resolveTexturePng('')).toBeNull();
   });
+
+  it('game: prefers the game folder but falls back to survival (the split base-game domain)', () => {
+    // 'gametex/foo' exists only under game/ — the game: prefix still finds it.
+    expect(corpus.resolveTexturePng('game:gametex/foo')).toBe(
+      join(root, 'assets', 'game', 'textures', 'gametex', 'foo.png'),
+    );
+    // 'test/skin' exists only under survival/ — a shipped game:-prefixed ref now resolves it
+    // (vanilla assets ship referenced as game: but physically live under survival/).
+    expect(corpus.resolveTexturePng('game:test/skin')).toBe(
+      join(root, 'assets', 'survival', 'textures', 'test', 'skin.png'),
+    );
+    // survival: stays restricted — no fallback into game/.
+    expect(corpus.resolveTexturePng('survival:gametex/foo')).toBeNull();
+  });
 });

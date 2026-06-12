@@ -111,7 +111,11 @@ export function createTextureSet(
   const walk = (els: readonly ElementJson[] | undefined): void => {
     for (const el of els ?? []) {
       for (const face of Object.values(el.faces ?? {})) {
-        if (face && typeof face.texture === 'string') addKey(face.texture);
+        // enabled:false faces are dropped at load and never rendered (fk.ts posedFaces skips
+        // them too), so their texture is dead data — collecting its key would wrongly report
+        // e.g. a vanilla '#null' on a disabled face as a "missing texture". Declared-but-
+        // unused keys from the textures map below still keep texIds stable when faces toggle.
+        if (face && face.enabled !== false && typeof face.texture === 'string') addKey(face.texture);
       }
       walk(el.children);
     }

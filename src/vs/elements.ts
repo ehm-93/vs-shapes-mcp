@@ -216,6 +216,22 @@ export interface FaceSpecEntry {
 
 export type FaceSpec = Partial<Record<FaceName, FaceSpecEntry>>;
 
+/**
+ * Uniform face shorthand: one spec applied to ALL SIX faces, each with auto-computed UVs
+ * (the [0, 0, faceWidth, faceHeight] rect 'auto-uv' produces), so the six per-face objects
+ * collapse to one. Used as `{ all: UniformFaceSpec }`.
+ */
+export interface UniformFaceSpec {
+  /** Texture ref for every face; '#' is prepended when missing. Defaults to the shape's first texture key. */
+  texture?: string;
+  /** UV rotation (0/90/180/270) on every face. */
+  rotation?: number;
+  /** Glow 0–255 on every face (omitted when 0/absent). */
+  glow?: number;
+  /** false disables every face (the engine drops it at load). */
+  enabled?: boolean;
+}
+
 export interface AddElementOpts {
   parent?: string;
   name: string;
@@ -226,10 +242,11 @@ export interface AddElementOpts {
   /**
    * 'auto-uv' (default): six faces textured with the shape's first texture key (or
    * '#skin'), each with the engine-auto-UV-style rect [0, 0, faceWidth, faceHeight]
-   * in shape units. 'none': no faces (the element still parents children). Or an
-   * explicit per-face spec.
+   * in shape units. 'none': no faces (the element still parents children).
+   * `{ all: UniformFaceSpec }`: the same auto UVs but with one texture/glow/rotation/enabled
+   * applied to all six faces (the uniform shorthand). Or an explicit per-face spec.
    */
-  faces?: 'auto-uv' | 'none' | FaceSpec;
+  faces?: 'auto-uv' | 'none' | FaceSpec | { all: UniformFaceSpec };
 }
 
 const VALID_UV_ROTATIONS = new Set([0, 90, 180, 270]);
@@ -267,6 +284,30 @@ function buildFace(texture: string, uv: [number, number, number, number], rotati
   return face;
 }
 
+/**
+ * Six auto-UV faces ([0, 0, faceW, faceH] per side), optionally with a uniform texture/
+ * glow/rotation/enabled applied to all of them. With an empty `uniform` this is exactly the
+ * 'auto-uv' default; `{ all: ... }` routes here so both share one code path.
+ */
+function buildAutoUvFaces(
+  doc: ShapeDocument,
+  size: Vec3,
+  uniform: UniformFaceSpec,
+  what: string,
+): Partial<Record<FaceName, FaceJson>> {
+  if (uniform.rotation !== undefined) assertUvRotation(uniform.rotation, what);
+  const tex = uniform.texture ?? defaultTextureRef(doc.root);
+  const faces: Partial<Record<FaceName, FaceJson>> = {};
+  for (const facing of FACE_NAMES) {
+    const [w, h] = faceDims(size, facing);
+    const face = buildFace(tex, [0, 0, w, h], uniform.rotation);
+    if (uniform.glow !== undefined && uniform.glow !== 0) face.glow = vsnum(uniform.glow);
+    if (uniform.enabled === false) face.enabled = false;
+    faces[facing] = face;
+  }
+  return faces;
+}
+
 export function addElement(doc: ShapeDocument, opts: AddElementOpts): ElementJson {
   const op = 'addElement';
   if (typeof opts.name !== 'string' || opts.name.length === 0) {
@@ -300,19 +341,15 @@ export function addElement(doc: ShapeDocument, opts: AddElementOpts): ElementJso
   }
 
   const facesOpt = opts.faces ?? 'auto-uv';
+  const size: Vec3 = [
+    Math.abs(opts.to[0] - opts.from[0]),
+    Math.abs(opts.to[1] - opts.from[1]),
+    Math.abs(opts.to[2] - opts.from[2]),
+  ];
   if (facesOpt === 'auto-uv') {
-    const size: Vec3 = [
-      Math.abs(opts.to[0] - opts.from[0]),
-      Math.abs(opts.to[1] - opts.from[1]),
-      Math.abs(opts.to[2] - opts.from[2]),
-    ];
-    const tex = defaultTextureRef(doc.root);
-    const faces: Partial<Record<FaceName, FaceJson>> = {};
-    for (const facing of FACE_NAMES) {
-      const [w, h] = faceDims(size, facing);
-      faces[facing] = buildFace(tex, [0, 0, w, h]);
-    }
-    el.faces = faces;
+    el.faces = buildAutoUvFaces(doc, size, {}, `${op}: '${opts.name}'`);
+  } else if (facesOpt !== 'none' && 'all' in facesOpt) {
+    el.faces = buildAutoUvFaces(doc, size, facesOpt.all, `${op}: '${opts.name}' uniform faces`);
   } else if (facesOpt !== 'none') {
     const faces: Partial<Record<FaceName, FaceJson>> = {};
     for (const facing of FACE_NAMES) {

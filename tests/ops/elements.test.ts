@@ -78,6 +78,39 @@ describe('addElement', () => {
     expect(rect('up')).toEqual([0, 0, 4, 2]); // sizeX × sizeZ
   });
 
+  it("'{ all }' applies one texture/glow/rotation to all six auto-UV faces", () => {
+    const doc = docOf(rig());
+    const el = addElement(doc, {
+      name: 'box',
+      from: [0, 0, 0],
+      to: [4, 3, 2],
+      faces: { all: { texture: 'fur', glow: 200, rotation: 90 } },
+    });
+    const faces = el.faces!;
+    expect(Object.keys(faces)).toEqual(['north', 'east', 'south', 'west', 'up', 'down']);
+    for (const f of Object.keys(faces) as FaceName[]) {
+      expect(faces[f]!.texture).toBe('#fur'); // '#' prepended, same key on every face
+      expect(faces[f]!.glow!.value).toBe(200);
+      expect(faces[f]!.rotation!.value).toBe(90);
+    }
+    // UVs are still auto-computed per face (same rects as 'auto-uv').
+    expect(faces.east!.uv.map((v) => v.value)).toEqual([0, 0, 2, 3]); // sizeZ × sizeY
+  });
+
+  it("'{ all }' can disable every face and rejects an invalid uv rotation", () => {
+    const doc = docOf(rig());
+    const el = addElement(doc, {
+      name: 'hidden',
+      from: [0, 0, 0],
+      to: [2, 2, 2],
+      faces: { all: { enabled: false } },
+    });
+    for (const f of Object.values(el.faces!)) expect(f!.enabled).toBe(false);
+    expect(() =>
+      addElement(doc, { name: 'bad', from: [0, 0, 0], to: [1, 1, 1], faces: { all: { rotation: 45 } } }),
+    ).toThrow(/rotation must be 0, 90, 180 or 270/);
+  });
+
   it("'none' adds no faces; parent nests the element; rotation fields are written", () => {
     const doc = docOf(rig());
     const el = addElement(doc, {

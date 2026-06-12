@@ -28,6 +28,18 @@ import type { Vec3 } from '../vs/types.js';
 const SHAPE_DOMAINS = ['survival', 'game'] as const;
 export type CorpusDomain = (typeof SHAPE_DOMAINS)[number];
 
+/**
+ * Texture-domain search order for an explicit `domain:` prefix. The engine's base-game
+ * `game` domain is split across both vanilla asset folders in a standard install — shipped
+ * shapes reference assets like `game:entity/lore/drifter/...` that physically live under
+ * `assets/survival/textures/` — so a `game:` ref falls back to `survival` to render what
+ * actually ships (preferring the matching `game` folder when it has the asset). Every other
+ * prefix (incl. `survival:` and mod-style refs) stays restricted to its own folder.
+ */
+const TEXTURE_DOMAIN_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  game: ['game', 'survival'],
+};
+
 export interface CorpusEntry {
   /** Relative corpus path, e.g. `entity/animal/mammal/fox/fox-male` (no `.json`). */
   path: string;
@@ -284,16 +296,20 @@ export class Corpus {
   /**
    * Resolve a shape-texture asset path (e.g. `entity/animal/mammal/fox/red-male`) to an
    * absolute PNG path, checking `<game>/assets/survival/textures/<p>.png` then
-   * `assets/game/textures/<p>.png`. A `survival:`/`game:` prefix restricts the domain
-   * (any other `domain:` prefix is tried as `assets/<domain>/textures/` for mod-style
-   * refs). A `.png` suffix and `textures/` prefix are tolerated. Returns null if absent.
+   * `assets/game/textures/<p>.png`. A `survival:` prefix restricts to that folder; a
+   * `game:` prefix prefers the `game` folder but falls back to `survival` (the engine's
+   * base-game domain is split across both vanilla folders in a standard install — see
+   * {@link TEXTURE_DOMAIN_ALIASES}); any other `domain:` prefix is tried as
+   * `assets/<domain>/textures/` for mod-style refs. A `.png` suffix and `textures/` prefix
+   * are tolerated. Returns null if absent.
    */
   resolveTexturePng(texturePath: string): string | null {
     let rel = texturePath.trim().replaceAll('\\', '/');
     let domains: readonly string[] = SHAPE_DOMAINS;
     const m = /^([a-z0-9_-]+):(.*)$/i.exec(rel);
     if (m) {
-      domains = [m[1]!.toLowerCase()];
+      const d = m[1]!.toLowerCase();
+      domains = TEXTURE_DOMAIN_ALIASES[d] ?? [d];
       rel = m[2]!;
     }
     rel = rel
