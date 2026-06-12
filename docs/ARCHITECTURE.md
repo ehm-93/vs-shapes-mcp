@@ -280,6 +280,22 @@ corpus.resolveTexturePng(texturePath: string): string | null   // absolute png p
 ## `server.ts` — MCP tools
 
 Stateful session: `session.ts` keeps `Map<docId, ShapeDocument>`; `docId` is `d1`, `d2`, …
+
+**Stateless mode (subagent workflows):** every `docId` param ALSO accepts a shape file path
+or `corpus:` ref, so a single tool call is self-contained — no shape_open/docId/shape_save
+handshake to thread through parallel subagents. Path-addressed docs load on demand into an
+LRU cache (cap 64) keyed by resolved path; every successful mutation auto-saves back to the
+file (the response carries `savedTo`), and the file is re-read whenever its on-disk text
+differs from the text last loaded/saved — the exact text is the freshness token, so
+concurrent editors (including separate server processes) compose at call granularity
+instead of clobbering each other with stale state. A path matching an open session doc's
+savePath resolves to that live doc (working copies and path edits compose, not fork).
+`corpus:` refs are read-only: mutations are refused with a copy-first recipe, and
+`shape_save(docId: 'corpus:…', path)` is the one-call corpus→file export. `element_import`
+accepts paths/corpus refs as `fromDocId` (kitbash without opening). Undo history of a
+path-addressed doc lives only in the server process and is dropped on an external file
+change; `shape_close` on a path/ref evicts the cache entry.
+
 Every mutating tool returns `{ summary, validation: { errors, warnings } }` (notes omitted
 unless asked) as JSON text content. Render tools return image content + a text caption.
 Errors become `CallToolResult`s with `isError: true` carrying actionable messages naming

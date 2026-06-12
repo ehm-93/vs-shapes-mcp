@@ -69,8 +69,23 @@ export class Session {
         (known.length > 0
           ? ` — open documents: ${known.map((e) => `${e.id} (${e.origin})`).join(', ')}.`
           : ` — no documents are open.`) +
-        ` Use shape_open or shape_create first (shape_list_open shows the registry).`,
+        ` Use shape_open or shape_create first (shape_list_open shows the registry),` +
+        ` or pass a shape file path / 'corpus:' ref directly (stateless mode — no open needed).`,
     );
+  }
+
+  /**
+   * The open document most recently bound to `path` (absolute), if any. Path-addressed
+   * (stateless) tool calls resolve through this first so a working copy opened with
+   * shape_open and edits addressed by file path compose on one live document instead of
+   * forking into two in-memory copies that clobber each other on save.
+   */
+  findBySavePath(path: string): ManagedDoc | undefined {
+    let found: ManagedDoc | undefined;
+    for (const entry of this.#docs.values()) {
+      if (entry.savePath === path) found = entry;
+    }
+    return found;
   }
 
   /** Close (deregister) a document; returns the removed entry. Throws when unknown. */

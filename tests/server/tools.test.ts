@@ -463,11 +463,15 @@ describe('server flows', () => {
   });
 
   it('unknown docId errors are actionable', async () => {
-    const res = await call('shape_describe', { docId: 'nope' });
-    const text = errorText(res);
-    expect(text).toContain("No open document with id 'nope'");
-    expect(text).toContain('d1'); // lists the known ids
-    expect(text).toContain('shape_open');
+    // d-shaped refs hit the session registry and list the known ids…
+    const unknownId = errorText(await call('shape_describe', { docId: 'd99' }));
+    expect(unknownId).toContain("No open document with id 'd99'");
+    expect(unknownId).toContain('d1'); // lists the known ids
+    expect(unknownId).toContain('shape_open');
+    // …anything else is a stateless file ref; a missing file names the alternatives.
+    const missingFile = errorText(await call('shape_describe', { docId: 'nope' }));
+    expect(missingFile).toContain('cannot read');
+    expect(missingFile).toContain("'corpus:<path>'");
   });
 
   it('unknown element errors carry near-miss suggestions', async () => {
@@ -500,10 +504,10 @@ describe('server hardening', () => {
   });
 
   it('tool errors carry the plain actionable message — no protocol-level "MCP error" prefix', async () => {
-    const res = await call('shape_describe', { docId: 'nope' });
+    const res = await call('shape_describe', { docId: 'd99' });
     const text = errorText(res);
     expect(text.startsWith('MCP error')).toBe(false);
-    expect(text).toContain("No open document with id 'nope'");
+    expect(text).toContain("No open document with id 'd99'");
   });
 
   it('doc_patch_json cannot break the parse-time structural invariants: the patch rolls back', async () => {

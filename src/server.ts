@@ -6,6 +6,10 @@
  * names are the compass side of the model the camera looks AT. Vec3 params are
  * [x, y, z] number tuples.
  *
+ * - Every docId param resolves through resolveDoc: a session id ('d1'), a shape file path
+ *   (stateless mode — loaded on demand, mutations auto-save back to the file, re-read when
+ *   the on-disk text changed), or a read-only 'corpus:' ref. Stateless calls are
+ *   self-contained, which is what parallel subagent workflows need.
  * - Every mutating tool runs exactly one doc.transact(summary, …) and replies with pretty
  *   JSON `{ summary, validation: { errors, warnings }, ...opData }` (fast validation;
  *   doc_patch_json runs the full suite). Tool errors become CallToolResults with
@@ -32,7 +36,7 @@ import type { BackendPreference } from './render/backend.js';
 import { extractPalette } from './render/palette.js';
 import { renderFilmstrip, renderGif, renderViews, type ViewName } from './render/views.js';
 import { runDocScript } from './script/api.js';
-import { Session, type ManagedDoc } from './session.js';
+import { ManagedDoc, Session } from './session.js';
 import {
   adjustChannel,
   animCodeOf,
@@ -125,7 +129,16 @@ function describeOversizedJson(ptr: string, plain: unknown, totalChars: number):
 
 const docIdParam = z
   .string()
-  .describe("Open-document id from shape_open/shape_create, e.g. 'd1' (shape_list_open lists them).");
+  .describe(
+    "Document ref: an open-document id from shape_open/shape_create like 'd1' (shape_list_open " +
+      'lists them), OR — stateless mode, no shape_open/shape_save needed — a shape .json file ' +
+      "path or a 'corpus:<shape path>' ref. Path-addressed documents are opened on demand and " +
+      'every mutation auto-saves back to the file (self-contained calls, safe for subagent ' +
+      "workflows; the file is re-read when it changed on disk). 'corpus:' refs are read-only.",
+  );
+
+/** Session docIds are `d<n>`; everything else addresses a file path or corpus ref. */
+const DOC_ID_RE = /^d\d+$/;
 
 const vec3Param = (desc: string) => z.tuple([z.number(), z.number(), z.number()]).describe(desc);
 
@@ -247,6 +260,126 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
     }
   };
 
+  // ---- stateless (path-addressed) documents -------------------------------------------
+  // Every docId param also accepts a shape file path or 'corpus:' ref, so a tool call is
+  // self-contained (subagent workflows: no shape_open/docId/shape_save handshake to thread
+  // through). Path docs load on demand into this LRU cache and every mutation auto-saves
+  // back to the file. Freshness token is the EXACT file text last loaded/saved — when the
+  // on-disk text differs (another process / a parallel subagent server wrote it), the doc
+  // is re-parsed, so concurrent editors compose at call granularity instead of silently
+  // clobbering each other with stale in-memory state. corpus: refs are read-only.
+
+  const STATELESS_CACHE_MAX = 64; // heavy vanilla shapes are ~1.4 MB; cap keeps RSS bounded
+
+  interface StatelessEntry {
+    m: ManagedDoc;
+    /** File text last loaded from / written to disk; undefined for corpus refs. */
+    diskText?: string;
+  }
+  const statelessCache = new Map<string, StatelessEntry>();
+
+  /** Insert/refresh an entry at the recent end; evict the stalest beyond the cap. */
+  const cacheSet = (key: string, entry: StatelessEntry): StatelessEntry => {
+    statelessCache.delete(key);
+    statelessCache.set(key, entry);
+    if (statelessCache.size > STATELESS_CACHE_MAX) {
+      statelessCache.delete(statelessCache.keys().next().value as string);
+    }
+    return entry;
+  };
+
+  interface DocRef {
+    m: ManagedDoc;
+    kind: 'session' | 'file' | 'corpus';
+    /** Set for file refs: mutating tools auto-save here after every transaction. */
+    autoSavePath?: string;
+    /** Records just-written text as the new on-disk freshness token (cache entries only). */
+    onSaved?: (text: string) => void;
+  }
+
+  const fileRef = (path: string, entry: StatelessEntry): DocRef => ({
+    m: entry.m,
+    kind: 'file',
+    autoSavePath: path,
+    onSaved: (text) => {
+      entry.diskText = text;
+    },
+  });
+
+  /** Resolve any docId value: session id, corpus ref, or filesystem path. */
+  const resolveDoc = (ref: string, toolName: string): DocRef => {
+    if (DOC_ID_RE.test(ref)) return { m: session.get(ref), kind: 'session' };
+    if (ref.startsWith('corpus:')) {
+      const hit = statelessCache.get(ref);
+      if (hit !== undefined) return { m: cacheSet(ref, hit).m, kind: 'corpus' };
+      const text = getCorpus(toolName).read(ref.slice('corpus:'.length));
+      const doc = ShapeDocument.parse(text, { path: ref });
+      const entry = cacheSet(ref, { m: new ManagedDoc(ref, doc, { origin: ref }) });
+      return { m: entry.m, kind: 'corpus' };
+    }
+    const path = resolve(ref);
+    // A session doc already bound to this file is authoritative: its (possibly unsaved)
+    // state must compose with path-addressed edits, not fork against a second disk copy.
+    const open = session.findBySavePath(path);
+    if (open !== undefined) return { m: open, kind: 'session', autoSavePath: path };
+    let text: string;
+    try {
+      text = readFileSync(path, 'utf8');
+    } catch (e) {
+      throw new Error(
+        `${toolName}: cannot read '${path}': ${e instanceof Error ? e.message : String(e)} — ` +
+          `a docId takes an open-document id ('d1'), an existing shape .json path, or ` +
+          `'corpus:<path>'. To start a new file, shape_create + shape_save it (or copy a ` +
+          `vanilla shape in one call: shape_save with docId 'corpus:<path>' and a destination).`,
+      );
+    }
+    const hit = statelessCache.get(path);
+    if (hit !== undefined && hit.diskText === text) return fileRef(path, cacheSet(path, hit));
+    // First touch, or the file changed on disk since the last load/save: (re)parse. A
+    // reload drops that doc's cached undo history — disk is ground truth in stateless mode.
+    const entry = cacheSet(path, {
+      m: new ManagedDoc(path, ShapeDocument.parse(text, { path }), { savePath: path, origin: path }),
+      diskText: text,
+    });
+    return fileRef(path, entry);
+  };
+
+  /** Mutating tools refuse read-only corpus refs with a copy-first recipe. */
+  const requireWritable = (ref: DocRef, op: string): void => {
+    if (ref.kind === 'corpus') {
+      throw new Error(
+        `${op}: '${ref.m.id}' is a read-only corpus reference — copy it to a file first ` +
+          `(one call: shape_save with docId '${ref.m.id}' and a destination path), then ` +
+          `address the copy by its path; or shape_open it for an in-session working copy.`,
+      );
+    }
+  };
+
+  /** Serialize + write a document to `target`; returns the exact text written. */
+  const writeDocTo = (m: ManagedDoc, target: string): string => {
+    const text = m.doc.serialize();
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, text, 'utf8');
+    return text;
+  };
+
+  /** Persist a path-addressed doc after a successful mutation/undo/redo. */
+  const autoSave = (ref: DocRef): { savedTo: string } | Record<string, never> => {
+    if (ref.autoSavePath === undefined) return {};
+    try {
+      const text = writeDocTo(ref.m, ref.autoSavePath);
+      ref.m.markClean(text);
+      ref.onSaved?.(text);
+    } catch (e) {
+      throw new Error(
+        `the edit succeeded in memory but auto-saving to '${ref.autoSavePath}' failed: ` +
+          `${e instanceof Error ? e.message : String(e)}. The document stays cached with the ` +
+          `edit applied — fix the path/permissions and retry, or shape_save it elsewhere.`,
+      );
+    }
+    return { savedTo: ref.autoSavePath };
+  };
+
   // ---- shared response plumbing ----
   const jsonResult = (payload: unknown): CallToolResult => ({
     content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
@@ -290,16 +423,27 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
     };
   };
 
-  /** One transaction per mutating tool; response = {summary, validation, ...opData}. */
+  /**
+   * One transaction per mutating tool; response = {summary, validation, ...opData}.
+   * Path-addressed documents auto-save after the transaction (the response then carries
+   * `savedTo`); corpus refs are refused up front.
+   */
   const mutate = (
     docId: string,
     summary: string,
     fn: (m: ManagedDoc) => Record<string, unknown> | void,
     level: 'fast' | 'full' = 'fast',
   ): CallToolResult => {
-    const m = session.get(docId);
+    const ref = resolveDoc(docId, summary.split(' ')[0] ?? summary);
+    requireWritable(ref, summary);
+    const m = ref.m;
     const opData = m.doc.transact(summary, () => fn(m));
-    return jsonResult({ summary, validation: validationSummary(m.doc, level), ...(opData ?? {}) });
+    return jsonResult({
+      summary,
+      validation: validationSummary(m.doc, level),
+      ...autoSave(ref),
+      ...(opData ?? {}),
+    });
   };
 
   /**
@@ -383,7 +527,10 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
         "tools. Accepts a filesystem path, or 'corpus:<shape path>' to open a vanilla shape " +
         "from the game install (e.g. 'corpus:entity/animal/mammal/fox/fox-male' — no .json, " +
         'no shapes/ prefix; discover paths with corpus_search). Parsing is lossless: an ' +
-        'unedited document saves back byte-identically.',
+        'unedited document saves back byte-identically. NOTE: opening is optional — every ' +
+        "docId param also accepts a file path or 'corpus:' ref directly (stateless mode; " +
+        'mutations auto-save), so only open a session doc when you want staged edits with an ' +
+        'explicit save.',
       inputSchema: {
         path: z
           .string()
@@ -464,8 +611,11 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
     'shape_save',
     {
       description:
-        'Serialize an open document to disk (VS model-creator style: CRLF, tabs, inline number ' +
-        'arrays — unedited documents round-trip byte-identically). Parent directories are created.',
+        'Serialize a document to disk (VS model-creator style: CRLF, tabs, inline number ' +
+        'arrays — unedited documents round-trip byte-identically). Parent directories are ' +
+        "created. docId also takes a 'corpus:' ref — the one-call vanilla-shape→file export " +
+        '(the copy is then editable by path) — or a file path (copy/no-op; path mutations ' +
+        'already auto-save).',
       inputSchema: {
         docId: docIdParam,
         path: z
@@ -473,25 +623,30 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
           .optional()
           .describe(
             'Destination .json path. Optional when the document was opened from (or previously ' +
-              'saved to) a file; corpus-opened and created documents need it the first time.',
+              'saved to) a file; corpus refs/docs and created documents need it the first time.',
           ),
       },
     },
     guard(({ docId, path }) => {
-      const m = session.get(docId);
-      const target = path !== undefined ? resolve(path) : m.savePath;
+      const ref = resolveDoc(docId, 'shape_save');
+      const m = ref.m;
+      const target = path !== undefined ? resolve(path) : (ref.autoSavePath ?? m.savePath);
       if (target === undefined) {
         throw new Error(
-          `shape_save: document ${m.id} (${m.origin}) has no save path — it was ` +
-            `${m.origin.startsWith('corpus:') ? 'opened from the read-only corpus' : 'created in-session'}; ` +
+          `shape_save: document ${m.id} (${m.origin}) has no save path — it is ` +
+            `${m.origin.startsWith('corpus:') ? 'a read-only corpus shape' : 'an in-session creation'}; ` +
             `pass 'path' with the destination file`,
         );
       }
-      const text = m.doc.serialize();
-      mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, text, 'utf8');
-      m.savePath = target;
-      m.markClean(text);
+      const text = writeDocTo(m, target);
+      if (ref.kind === 'session') {
+        m.savePath = target;
+        m.markClean(text);
+      } else if (ref.kind === 'file' && target === ref.autoSavePath) {
+        m.markClean(text);
+        ref.onSaved?.(text);
+      }
+      // corpus refs stay pristine: shape_save is a copy-out, the source remains read-only
       return jsonResult({
         savedTo: target,
         bytes: Buffer.byteLength(text, 'utf8'),
@@ -505,10 +660,21 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
     {
       description:
         'Close an open document and free its docId. Unsaved changes are discarded (the response ' +
-        'tells you whether there were any).',
+        'tells you whether there were any). A file path or corpus ref evicts that entry from ' +
+        'the stateless cache instead (the file keeps every auto-saved change).',
       inputSchema: { docId: docIdParam },
     },
     guard(({ docId }) => {
+      if (!DOC_ID_RE.test(docId)) {
+        const key = docId.startsWith('corpus:') ? docId : resolve(docId);
+        const had = statelessCache.delete(key);
+        return jsonResult({
+          closed: docId,
+          note: had
+            ? 'evicted from the stateless cache (auto-saved changes are on disk; cached undo history is gone)'
+            : 'nothing was cached for this ref — nothing to do',
+        });
+      }
       const m = session.get(docId);
       const hadUnsavedChanges = m.dirty;
       session.close(docId);
@@ -523,11 +689,17 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
   server.registerTool(
     'shape_list_open',
     {
-      description: 'List every open document: docId, source, save path, dirty flag, quick stats.',
+      description:
+        'List every open document (docId, source, save path, dirty flag, quick stats) plus ' +
+        'the stateless cache of path/corpus-addressed documents.',
       inputSchema: {},
     },
     guard(() =>
       jsonResult({
+        statelessCache: [...statelessCache.keys()].map((ref) => ({
+          ref,
+          kind: ref.startsWith('corpus:') ? 'corpus (read-only)' : 'file (mutations auto-save)',
+        })),
         open: session.list().map((m) => {
           // Per-doc guard: ONE corrupted document (e.g. via doc_patch_json) must not make
           // the whole registry listing fail — this is the tool agents are pointed at to
@@ -565,33 +737,42 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
     {
       description:
         'Undo the most recent transaction on a document (every mutating tool call is one ' +
-        'transaction). Restores the tree byte-identically, including number formatting.',
+        'transaction). Restores the tree byte-identically, including number formatting. ' +
+        'Path-addressed documents save the undone state back to the file.',
       inputSchema: { docId: docIdParam },
     },
     guard(({ docId }) => {
-      const m = session.get(docId);
-      const undone = m.doc.undo();
-      return jsonResult(
-        undone === null
-          ? { undone: null, note: 'nothing to undo' }
-          : { undone, validation: validationSummary(m.doc) },
-      );
+      const ref = resolveDoc(docId, 'doc_undo');
+      const undone = ref.m.doc.undo();
+      if (undone === null) {
+        return jsonResult({
+          undone: null,
+          note:
+            'nothing to undo' +
+            (ref.kind === 'file'
+              ? ' (path-addressed docs keep history only while cached: a server restart or an external file change clears it)'
+              : ''),
+        });
+      }
+      return jsonResult({ undone, validation: validationSummary(ref.m.doc), ...autoSave(ref) });
     }),
   );
 
   server.registerTool(
     'doc_redo',
     {
-      description: 'Re-apply the most recently undone transaction on a document.',
+      description:
+        'Re-apply the most recently undone transaction on a document. Path-addressed documents ' +
+        'save the redone state back to the file.',
       inputSchema: { docId: docIdParam },
     },
     guard(({ docId }) => {
-      const m = session.get(docId);
-      const redone = m.doc.redo();
+      const ref = resolveDoc(docId, 'doc_redo');
+      const redone = ref.m.doc.redo();
       return jsonResult(
         redone === null
           ? { redone: null, note: 'nothing to redo' }
-          : { redone, validation: validationSummary(m.doc) },
+          : { redone, validation: validationSummary(ref.m.doc), ...autoSave(ref) },
       );
     }),
   );
@@ -604,7 +785,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
         "'at' is a monotonic sequence number, not wall-clock time).",
       inputSchema: { docId: docIdParam },
     },
-    guard(({ docId }) => jsonResult({ history: session.get(docId).doc.history() })),
+    guard(({ docId }) => jsonResult({ history: resolveDoc(docId, 'doc_history').m.doc.history() })),
   );
 
   // =====================================================================================
@@ -631,7 +812,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       },
     },
     guard(({ docId, level, element }) => {
-      const m = session.get(docId);
+      const m = resolveDoc(docId, 'shape_describe').m;
       const doc = m.doc;
       const lvl = level ?? 'summary';
       if (lvl === 'summary') return jsonResult(docSummary(m));
@@ -707,7 +888,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       },
     },
     guard(({ docId, elements }) => {
-      const m = session.get(docId);
+      const m = resolveDoc(docId, 'shape_measure').m;
       const doc = m.doc;
       if ((doc.root.elements ?? []).length === 0) {
         throw new Error(
@@ -789,7 +970,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       },
     },
     guard(({ docId, glob }) => {
-      const m = session.get(docId);
+      const m = resolveDoc(docId, 'shape_find').m;
       const re = elementGlobToRegExp(glob);
       const matches: { name: string; parent: string | null; path: string }[] = [];
       m.doc.walk((el, path) => {
@@ -1096,7 +1277,12 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
         'are stripped when importing under a parent (stale overlay-attachment data).',
       inputSchema: {
         docId: docIdParam,
-        fromDocId: z.string().describe('docId of the open source document to copy from.'),
+        fromDocId: z
+          .string()
+          .describe(
+            "Source document to copy from: an open docId, a shape .json file path, or a 'corpus:' " +
+              'ref (kitbash vanilla parts without opening them first).',
+          ),
         name: z.string().describe('Element subtree (in the source document) to import.'),
         parent: z
           .string()
@@ -1105,15 +1291,17 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       },
     },
     guard(({ docId, fromDocId, name, parent }) => {
-      const source = session.get(fromDocId);
+      const source = resolveDoc(fromDocId, 'element_import');
       return mutate(docId, `element_import '${name}' from ${fromDocId}`, (m) => {
-        if (m.id === source.id) {
+        // Doc-object identity, not id equality: a path ref and a docId can name the
+        // same live document (path refs resolve to a matching open session doc).
+        if (m.doc === source.m.doc) {
           throw new Error(
             `element_import: source and target are the same document (${m.id}) — use ` +
               `element_duplicate to copy within one document`,
           );
         }
-        const result = importElement(m.doc, source.doc, name, {
+        const result = importElement(m.doc, source.m.doc, name, {
           ...(parent !== undefined ? { parent } : {}),
         });
         return { imported: name, fromDocId, ...result };
@@ -1134,7 +1322,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       inputSchema: { docId: docIdParam },
     },
     guard(({ docId }) =>
-      jsonResult({ animations: session.get(docId).doc.listAnimations().map(animSummary) }),
+      jsonResult({ animations: resolveDoc(docId, 'anim_list').m.doc.listAnimations().map(animSummary) }),
     ),
   );
 
@@ -1150,7 +1338,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       },
     },
     guard(({ docId, code }) => {
-      const m = session.get(docId);
+      const m = resolveDoc(docId, 'anim_describe').m;
       const anim = requireAnimation(m.doc, code, 'anim_describe');
       const animated = new Set<string>();
       const keyframes = (anim.keyframes ?? []).map((kf) => {
@@ -1508,7 +1696,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       },
     },
     guard(({ docId, elements, summary }) => {
-      const report = uvReport(session.get(docId).doc, {
+      const report = uvReport(resolveDoc(docId, 'uv_report').m.doc, {
         ...(elements !== undefined ? { elements } : {}),
       });
       if (summary !== true) return jsonResult({ report });
@@ -1748,7 +1936,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       },
     },
     guard(async ({ docId, views, anim, frame, size, overlayHitbox, texturesRoot, savePath }) => {
-      const m = session.get(docId);
+      const m = resolveDoc(docId, 'render_views').m;
       const result = await renderViews(m.doc, {
         ...(views !== undefined ? { views: views as ViewName[] } : {}),
         ...(anim !== undefined ? { anim } : {}),
@@ -1790,7 +1978,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       },
     },
     guard(async ({ docId, anim, frames, view, size, texturesRoot, savePath }) => {
-      const m = session.get(docId);
+      const m = resolveDoc(docId, 'render_filmstrip').m;
       const result = await renderFilmstrip(m.doc, {
         anim,
         ...(frames !== undefined ? { frames } : {}),
@@ -1844,7 +2032,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       },
     },
     guard(async ({ docId, anim, frames, view, views, size, fps, loop, texturesRoot, savePath }) => {
-      const m = session.get(docId);
+      const m = resolveDoc(docId, 'render_gif').m;
       const result = await renderGif(m.doc, {
         anim,
         ...(frames !== undefined ? { frames } : {}),
@@ -1906,7 +2094,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       },
     },
     guard(({ docId, maxColors, exact, alphaThreshold, perTexture, texturesRoot }) => {
-      const m = session.get(docId);
+      const m = resolveDoc(docId, 'palette_extract').m;
       const result = extractPalette(m.doc, {
         ...(maxColors !== undefined ? { maxColors } : {}),
         ...(exact !== undefined ? { exact } : {}),
@@ -1955,7 +2143,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       },
     },
     guard(({ docId, level, footElements }) => {
-      const m = session.get(docId);
+      const m = resolveDoc(docId, 'validate_run').m;
       const findings = validateDocument(m.doc, {
         level: level ?? 'fast',
         ...(footElements !== undefined ? { footElements } : {}),
@@ -2046,7 +2234,7 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
       },
     },
     guard(({ docId, jsonPointer }) => {
-      const m = session.get(docId);
+      const m = resolveDoc(docId, 'doc_get_json').m;
       const ptr = jsonPointer ?? '';
       const target = getAt(m.doc.root as unknown as JsonValue, ptr, 'doc_get_json');
       const plain = toPlain(target);

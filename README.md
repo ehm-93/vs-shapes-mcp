@@ -53,7 +53,7 @@ The game install is auto-discovered (`--game-path` → `VINTAGE_STORY` env →
 `%APPDATA%/Vintagestory`). Without an install the server still edits and validates;
 corpus tools error clearly and renders fall back to deterministic flat colors.
 
-## Tools (40)
+## Tools (44)
 
 | Group | Tools |
 |---|---|
@@ -63,14 +63,23 @@ corpus tools error clearly and renders fall back to deterministic flat colors.
 | Geometry | `element_add`, `element_edit`, `element_rename` (cascades into keyframes), `element_reparent`, `element_mirror`, `element_scale`, `element_delete`, `element_duplicate`, `element_import` |
 | Animation | `anim_list`, `anim_describe`, `anim_create`, `anim_delete`, `anim_edit_meta`, `anim_set_keyframe`, `anim_delete_keyframe`, `anim_adjust`, `anim_retime`, `anim_mirror_phase` |
 | UV / faces | `uv_report`, `uv_set_face`, `uv_auto` (incremental with `elements`), `face_set` (bulk texture/glow/enabled) |
-| Perception | `render_views`, `render_filmstrip`, `render_gif` (looping animation; all export to disk via `savePath`) |
+| Perception | `render_views`, `render_filmstrip`, `render_gif` (looping animation; all export to disk via `savePath`), `palette_extract` (texture colors → ranked palette) |
 | Validation | `validate_run` (also runs after every mutation) |
 | Corpus | `corpus_search`, `corpus_describe` |
-| Escape hatch | `doc_get_json`, `doc_patch_json` (RFC 6902, transactional, fully validated) |
+| Escape hatch | `doc_get_json`, `doc_patch_json` (RFC 6902, transactional, fully validated), `doc_script` (sandboxed procedural mutation) |
 
 Conventions the tools document in their schemas: geometry units are 1/16 block; north = −Z;
 **vanilla creatures face west (−X)**, so the `n` render view shows a side profile; view names
 are the compass side the camera looks at.
+
+**Stateless mode (subagent workflows):** every `docId` param also accepts a shape `.json`
+file path or a `corpus:` ref — no `shape_open`/`shape_save` handshake. Path-addressed
+documents open on demand and every mutation auto-saves back to the file (the response
+carries `savedTo`); the file is re-read when it changed on disk, so parallel agents — even
+separate server processes — compose at call granularity instead of clobbering each other.
+`corpus:` refs are read-only; `shape_save` with a `corpus:` ref and a `path` is the
+one-call vanilla-shape→file export, and `element_import` takes them as `fromDocId` for
+kitbashing.
 
 ## Development
 
