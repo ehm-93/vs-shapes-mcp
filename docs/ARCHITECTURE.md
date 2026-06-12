@@ -293,8 +293,9 @@ grouping:
 | `element_add` / `element_edit` / `element_rename` / `element_reparent` / `element_mirror` / `element_scale` / `element_delete` / `element_duplicate` / `element_import` | elements.ts |
 | `anim_list` / `anim_describe` | query |
 | `anim_create` / `anim_delete` / `anim_edit_meta` / `anim_set_keyframe` / `anim_delete_keyframe` / `anim_adjust` / `anim_retime` / `anim_mirror_phase` | animation.ts |
-| `uv_report` / `uv_set_face` / `uv_auto` | uv.ts |
-| `render_views` / `render_filmstrip` | render |
+| `uv_report` / `uv_set_face` / `uv_auto` / `face_set` | uv.ts |
+| `render_views` / `render_filmstrip` / `render_gif` | render |
+| `palette_extract` (maxColors?, exact?) | render/palette.ts — model texture colors → ranked palette |
 | `validate_run` (level) | validate |
 | `corpus_search` / `corpus_describe` / (open via `shape_open` `corpus:` path) | corpus |
 | `doc_get_json` (jsonPointer?) / `doc_patch_json` (RFC-6902 patch) | escape hatch; patch runs in a transaction, full validation after |

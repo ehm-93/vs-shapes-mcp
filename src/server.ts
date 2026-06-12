@@ -29,6 +29,7 @@ import { z } from 'zod';
 
 import { initCorpus, type Corpus } from './corpus/corpus.js';
 import type { BackendPreference } from './render/backend.js';
+import { extractPalette } from './render/palette.js';
 import { renderFilmstrip, renderGif, renderViews, type ViewName } from './render/views.js';
 import { Session, type ManagedDoc } from './session.js';
 import {
@@ -2054,6 +2055,76 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
         renderer,
       });
       return renderResultContent(result.gif, result.caption, result.missingTextures, savePath, 'image/gif');
+    }),
+  );
+
+  server.registerTool(
+    'palette_extract',
+    {
+      description:
+        "Extract a model's color palette from its texture PNGs: a compact set of colors ranked " +
+        'by how much of the texels they cover (hex + rgb + coverage fraction). Use it to reuse a ' +
+        "vanilla creature's colors on a new model, or to describe its color scheme. By default " +
+        'colors are median-cut representatives (vanilla textures are dithered into thousands of ' +
+        'near-identical shades — distinctColors reports that noisiness); pass exact: true for the ' +
+        'precise 8-bit colors of flat pixel art. Textures resolve exactly like the render tools ' +
+        '(game install + optional texturesRoot); a key whose PNG is not found is reported as ' +
+        'missing and excluded (its flat fallback is not a real model color). Reads the textures ' +
+        'map only, no geometry.',
+      inputSchema: {
+        docId: docIdParam,
+        maxColors: z
+          .number()
+          .int()
+          .optional()
+          .describe('Max colors in the combined (and per-texture) palette, 1–256, by coverage. Default 16.'),
+        exact: z
+          .boolean()
+          .optional()
+          .describe(
+            'true: return exact 8-bit RGB colors ranked by coverage (best for flat textures); ' +
+              'default false uses median-cut representatives (best for dithered vanilla textures).',
+          ),
+        alphaThreshold: z
+          .number()
+          .int()
+          .optional()
+          .describe(
+            'Minimum pixel alpha (0–255) to count a texel; below it is treated as transparent ' +
+              'background. Default 13 (the engine alpha cutout).',
+          ),
+        perTexture: z
+          .boolean()
+          .optional()
+          .describe('true: also return a per-texture-key breakdown (default false).'),
+        texturesRoot: z
+          .string()
+          .optional()
+          .describe('Extra directory to resolve texture PNGs (mod assets); game assets always fall back.'),
+      },
+    },
+    guard(({ docId, maxColors, exact, alphaThreshold, perTexture, texturesRoot }) => {
+      const m = session.get(docId);
+      const result = extractPalette(m.doc, {
+        ...(maxColors !== undefined ? { maxColors } : {}),
+        ...(exact !== undefined ? { exact } : {}),
+        ...(alphaThreshold !== undefined ? { alphaThreshold } : {}),
+        ...(perTexture !== undefined ? { perTexture } : {}),
+        ...(texturesRoot !== undefined ? { texturesRoot } : {}),
+      });
+      const note =
+        result.resolvedTextures.length === 0
+          ? (Object.keys(m.doc.root.textures ?? {}).length === 0
+              ? 'this shape declares no textures — nothing to sample'
+              : `no texture PNG resolved (missing: ${result.missingTextures.map((k) => `'#${k}'`).join(', ')}). ` +
+                (corpusAvailable()
+                  ? 'Check the textures map paths (shape_describe), or pass texturesRoot for mod assets.'
+                  : 'No game install was found: start the server with --game-path to resolve vanilla textures.'))
+          : result.missingTextures.length > 0
+            ? `skipped unresolved texture${result.missingTextures.length > 1 ? 's' : ''}: ` +
+              result.missingTextures.map((k) => `'#${k}'`).join(', ')
+            : undefined;
+      return jsonResult({ docId: m.id, ...result, ...(note !== undefined ? { note } : {}) });
     }),
   );
 

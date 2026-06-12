@@ -201,7 +201,13 @@ function gameAssetResolver(): TextureResolver {
   };
 }
 
-function buildResolvers(texturesRoot: string | undefined): TextureResolver[] {
+/**
+ * Ordered texture-PNG resolver chain shared by every texture-reading tool: an optional
+ * mod-assets `texturesRoot` first (tried both as `<root>/textures/<p>.png` and
+ * `<root>/<p>.png`), then the game install via the lazily-cached corpus. Exported so
+ * render/palette.ts resolves textures byte-identically to the renderer.
+ */
+export function buildResolvers(texturesRoot: string | undefined): TextureResolver[] {
   const resolvers: TextureResolver[] = [];
   if (texturesRoot !== undefined && texturesRoot !== '') {
     resolvers.push((texturePath) => {
