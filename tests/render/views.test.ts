@@ -247,6 +247,26 @@ describe('renderGif (no corpus needed)', () => {
     expect(Buffer.compare(a.gif, b.gif)).toBe(0);
   });
 
+  it('a multi-view grid sizes the GIF to cols×rows tiles', async () => {
+    const r = await renderGif(spinDoc, {
+      anim: 'spin',
+      views: ['w', 'n', 'sw', 'top'],
+      frames: 4,
+      size: 48,
+      renderer: 'software',
+    });
+    expect(r.gif.subarray(0, 6).toString('latin1')).toBe('GIF89a');
+    expect(r.gif.readUInt16LE(6)).toBe(96); // 2 cols × 48
+    expect(r.gif.readUInt16LE(8)).toBe(96); // 2 rows × 48
+    expect(r.caption).toContain('views w,n,sw,top');
+    expect(r.caption).toContain('96x96');
+
+    // three views → one row of three
+    const wide = await renderGif(spinDoc, { anim: 'spin', views: ['w', 'n', 'e'], frames: 3, size: 40, renderer: 'software' });
+    expect(wide.gif.readUInt16LE(6)).toBe(120); // 3 × 40
+    expect(wide.gif.readUInt16LE(8)).toBe(40); // 1 row
+  });
+
   it('defaults frames to min(quantityFrames, 48) and reports missing textures', async () => {
     const r = await renderGif(spinDoc, { anim: 'spin', size: 48, renderer: 'software' });
     expect(r.frameCount).toBe(8); // quantityFrames

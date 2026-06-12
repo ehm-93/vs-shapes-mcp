@@ -2019,8 +2019,15 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
         view: z
           .enum(VIEW_VALUES)
           .optional()
-          .describe("View for every frame (side the camera looks AT; north = −Z). Default 'e'."),
-        size: z.number().int().optional().describe('Pixels per square frame, 32–2048 (default 200).'),
+          .describe("Single view (side the camera looks AT; north = −Z). Default 'e'. Ignored when 'views' is set."),
+        views: z
+          .array(z.enum(VIEW_VALUES))
+          .optional()
+          .describe(
+            'Multiple views → each animation frame is a composited grid (2-column for ≥4, one ' +
+              'row for fewer), like render_views but animated. Overrides view.',
+          ),
+        size: z.number().int().optional().describe('Pixels per square tile, 32–2048 (default 200).'),
         fps: z
           .number()
           .optional()
@@ -2033,12 +2040,13 @@ export function buildServer(opts: BuildServerOpts = {}): McpServer {
         savePath: savePathParam,
       },
     },
-    guard(async ({ docId, anim, frames, view, size, fps, loop, texturesRoot, savePath }) => {
+    guard(async ({ docId, anim, frames, view, views, size, fps, loop, texturesRoot, savePath }) => {
       const m = session.get(docId);
       const result = await renderGif(m.doc, {
         anim,
         ...(frames !== undefined ? { frames } : {}),
         ...(view !== undefined ? { view: view as ViewName } : {}),
+        ...(views !== undefined ? { views: views as ViewName[] } : {}),
         ...(size !== undefined ? { size } : {}),
         ...(fps !== undefined ? { fps } : {}),
         ...(loop !== undefined ? { loop } : {}),

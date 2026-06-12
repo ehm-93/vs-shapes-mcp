@@ -166,8 +166,14 @@ export interface RenderGifOpts {
    * Sampling every source frame at the playback fps reproduces engine speed exactly.
    */
   frames?: number;
+  /** Single view (the side the camera looks AT). Default 'e'. Ignored when `views` is set. */
   view?: ViewName;
-  /** Pixels per square frame, default 200. */
+  /**
+   * Multiple views → each animation frame is a composited grid (2-column for ≥4, one row
+   * for fewer), like render_views but animated. Overrides `view`.
+   */
+  views?: ViewName[];
+  /** Pixels per square tile, default 200. */
   size?: number;
   /** Playback frames per second (the engine convention is 30). Default 30. */
   fps?: number;
@@ -609,11 +615,13 @@ export async function renderFilmstrip(
 }
 
 /**
- * Renders an animation as a looping GIF89a. Each sampled frame is rendered to its own
- * full canvas (shared camera fit across the cycle, ground line, no labels), then the
- * frames are colour-quantized to a single global 256-colour palette (consistent colours,
- * no inter-frame flicker) and LZW-encoded. Sampling every source frame at the playback
- * fps reproduces the engine's on-screen speed exactly.
+ * Renders an animation as a looping GIF89a. With one view each frame is a single tile;
+ * with several views each frame is a composited grid (like renderViews, animated). The
+ * camera fit is shared across every frame AND every view so nothing jumps, and tiles
+ * carry the same chrome as renderViews (ground grid, N marker, view label, scale bar).
+ * Frames are colour-quantized to a single global 256-colour palette (no inter-frame
+ * flicker) and LZW-encoded; sampling every source frame at the playback fps reproduces
+ * the engine's on-screen speed exactly.
  */
 export async function renderGif(doc: ShapeDocLike, opts: RenderGifOpts): Promise<RenderGifResult> {
   const root = rootOf(doc);
@@ -638,7 +646,7 @@ export async function renderGif(doc: ShapeDocLike, opts: RenderGifOpts): Promise
     throw new Error(`renderGif: fps must be between 1 and 60, got ${fps}`);
   }
   const loop = opts.loop ?? true;
-  const view = opts.view ?? 'e';
+  const views = opts.views !== undefined && opts.views.length > 0 ? opts.views : [opts.view ?? 'e'];
   const frames = Array.from({ length: count }, (_, i) => (i * quantityFrames) / count);
 
   const bounds = modelBounds(root, { anim: opts.anim, frames });
@@ -646,31 +654,39 @@ export async function renderGif(doc: ShapeDocLike, opts: RenderGifOpts): Promise
   const texSet = createTextureSet(root, buildResolvers(opts.texturesRoot));
   const backend = await selectBackend(opts.renderer ?? 'auto');
 
-  const { yawDeg, pitchDeg } = viewToYawPitch(view);
-  const camera = createOrthoCamera({ yawDeg, pitchDeg, center, extent, viewport: { w: size, h: size } });
-  const yawRad = (yawDeg * Math.PI) / 180;
-  const right: Vec3 = [-Math.cos(yawRad), 0, Math.sin(yawRad)];
-  const zBias = extent * 1e-3;
-  const groundLine: SceneLine = {
-    a: screenVertex(camera, [center[0] - right[0] * extent, 0, center[2] - right[2] * extent], 0, 0, zBias),
-    b: screenVertex(camera, [center[0] + right[0] * extent, 0, center[2] + right[2] * extent], 0, 0, zBias),
-    rgba: GRID_RGBA,
-    depthTest: true,
-  };
+  // Per-view camera + ground/marker lines are constant across frames (the bounds union is
+  // fixed), so build them once; only the model tris change per frame.
+  const tileCams = views.map((view) => {
+    const camera = createOrthoCamera({ ...viewToYawPitch(view), center, extent, viewport: { w: size, h: size } });
+    return { view, camera, lines: buildGroundAndOverlays(camera, { bounds, center, extent }) };
+  });
+  const cols = views.length < 4 ? views.length : Math.ceil(Math.sqrt(views.length));
+  const rows = Math.ceil(views.length / cols);
+  const canvasW = cols * size;
+  const canvasH = rows * size;
 
-  // Render every frame to its own RGBA buffer.
+  // Render every animation frame to its own (grid) canvas.
   const rendered: Uint8ClampedArray[] = [];
   for (const frame of frames) {
     const faces = posedFaces(root, { anim: opts.anim, frame });
-    const job: SceneJob = {
-      width: size,
-      height: size,
-      clear: BG,
-      textures: texSet.textures,
-      tris: buildModelTris(faces, camera, texSet),
-      lines: [groundLine],
-    };
-    rendered.push(await backend.renderScene(job));
+    const canvas = asFramebuffer(canvasW, canvasH, new Uint8ClampedArray(canvasW * canvasH * 4));
+    fillRect(canvas, 0, 0, canvasW, canvasH, BG);
+    for (let i = 0; i < tileCams.length; i++) {
+      const { view, camera, lines } = tileCams[i]!;
+      const job: SceneJob = {
+        width: size,
+        height: size,
+        clear: BG,
+        textures: texSet.textures,
+        tris: buildModelTris(faces, camera, texSet),
+        lines,
+      };
+      const fb = asFramebuffer(size, size, await backend.renderScene(job));
+      overlayTileChrome(fb, view, camera.pxPerUnit, size);
+      drawTileBorder(fb);
+      blit(fb, canvas, (i % cols) * size, Math.floor(i / cols) * size);
+    }
+    rendered.push(canvas.rgba);
   }
 
   // One global palette, built from a bounded sample of frames so colours stay stable
@@ -690,8 +706,8 @@ export async function renderGif(doc: ShapeDocLike, opts: RenderGifOpts): Promise
   const enc = GIFEncoder();
   const delay = Math.round(1000 / fps);
   for (let i = 0; i < rendered.length; i++) {
-    const index = applyPalette(new Uint8Array(rendered[i]!.buffer.slice(0)), palette, 'rgb565');
-    enc.writeFrame(index, size, size, {
+    const index = applyPalette(rendered[i]!, palette, 'rgb565');
+    enc.writeFrame(index, canvasW, canvasH, {
       palette,
       delay,
       ...(i === 0 ? { repeat: loop ? 0 : -1 } : {}),
@@ -701,8 +717,9 @@ export async function renderGif(doc: ShapeDocLike, opts: RenderGifOpts): Promise
 
   const missing = [...texSet.missing];
   const caption =
-    `gif anim '${opts.anim}' view ${view} | ${count} frames over ${quantityFrames} at ${fps} fps ` +
-    `(${delay}ms/frame, ${loop ? 'looping' : 'once'}) | ${size}px | backend ${backend.name}` +
+    `gif anim '${opts.anim}' ${views.length > 1 ? `views ${views.join(',')}` : `view ${views[0]}`} | ` +
+    `${count} frames over ${quantityFrames} at ${fps} fps (${delay}ms/frame, ${loop ? 'looping' : 'once'}) | ` +
+    `${canvasW}x${canvasH} (${size}px tiles) | backend ${backend.name}` +
     (missing.length > 0 ? ` | missing textures: ${missing.join(', ')}` : '');
 
   return { gif: Buffer.from(enc.bytes()), missingTextures: missing, caption, frameCount: count };
